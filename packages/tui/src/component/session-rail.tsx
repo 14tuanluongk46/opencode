@@ -100,6 +100,12 @@ export function SessionHistoryRail(props: { focused: () => boolean; onFocus: () 
     }),
   )
 
+  onCleanup(
+    event.on("session.created", () => {
+      void refetchBrowse()
+    }),
+  )
+
   createEffect(() => {
     if (!props.focused()) return
     const focused = renderer.currentFocusedRenderable
