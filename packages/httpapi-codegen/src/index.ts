@@ -46,7 +46,10 @@ export type EffectOutputType = {
   readonly import: string
 }
 
-type ResolvedEffectTypeReference = Omit<EffectTypeReference, "schema"> & { readonly ast: SchemaAST.AST }
+type ResolvedEffectTypeReference = Omit<EffectTypeReference, "schema"> & {
+  readonly ast: SchemaAST.AST
+  readonly type: string | undefined
+}
 
 export class GenerationError extends Schema.TaggedError<GenerationError>()("GenerationError", {
   reason: Schema.String,
@@ -454,7 +457,6 @@ function effectTypeReferences(input: ReadonlyArray<EffectTypeReference>) {
   const asts = new Map<SchemaAST.AST, ResolvedEffectTypeReference>()
   const brands = new Map<string, ResolvedEffectTypeReference>()
   for (const reference of input) {
-    const value = { name: reference.name, import: reference.import, ast: reference.schema.ast }
     const document = SchemaRepresentation.toCodeDocument(
       SchemaRepresentation.toRepresentations([codegenAst(Schema.toType(reference.schema).ast)]),
     )
@@ -463,6 +465,7 @@ function effectTypeReferences(input: ReadonlyArray<EffectTypeReference>) {
       name === undefined
         ? undefined
         : (document.references.nonRecursives.find((item) => item.$ref === name)?.code.Type ?? name)
+    const value = { name: reference.name, import: reference.import, ast: reference.schema.ast, type }
     if (type?.includes("Brand.Brand<") && !brands.has(type)) brands.set(type, value)
     if (SchemaAST.resolveIdentifier(reference.schema.ast) !== undefined || type?.includes("Brand.Brand<")) {
       asts.set(reference.schema.ast, value)
@@ -499,7 +502,10 @@ function effectType(schema: Schema.Top, references: ReturnType<typeof effectType
         "g",
       )
       if (!pattern.test(type)) continue
-      const reference = references.names.get(name)
+      // Optional/encoded occurrences can acquire a numeric suffix. Reuse the named
+      // type only when its definition matches; a suffix can also denote a different shape.
+      const candidate = references.names.get(name.replace(/_\d+$/, ""))
+      const reference = references.names.get(name) ?? (candidate?.type === value ? candidate : undefined)
       if (reference !== undefined) {
         imports.add(reference.import)
         type = type.replace(pattern, reference.name)
@@ -579,11 +585,11 @@ function groupShapeTypeName(group: Group, endpoint: Endpoint) {
 function assertPromiseEndpoint(endpoint: Endpoint) {
   const name = `${endpoint.group}.${endpoint.endpoint.identifier}`
   const payload = endpoint.payloads[0]
-  const payloadEncoding = payload === undefined ? undefined : resolveHttpApiEncoding(payload.ast)
-  if (
-    payload !== undefined &&
-    (payloadEncoding?._tag ?? (HttpMethod.hasBody(endpoint.endpoint.method) ? "Json" : "FormUrlEncoded")) !== "Json"
-  ) {
+  const payloadEncoding =
+    payload === undefined
+      ? undefined
+      : (resolveHttpApiEncoding(payload.ast)?._tag ?? (HttpMethod.hasBody(endpoint.endpoint.method) ? "Json" : "FormUrlEncoded"))
+  if (payloadEncoding !== undefined && payloadEncoding !== "Json" && payloadEncoding !== "Uint8Array") {
     throw new GenerationError({ reason: `Unsupported Promise payload encoding: ${name}` })
   }
   const success = endpoint.successes[0]
@@ -939,7 +945,7 @@ function renderPromiseClient(groups: ReadonlyArray<Group>) {
         endpoint.payloads.length === 0 ? undefined : `body: ${part("payload")}`,
       ].filter((value): value is string => value !== undefined)
       const declaredStatuses = [...new Set(endpoint.errors.map((error) => error.status))]
-      const descriptor = `{ method: ${JSON.stringify(endpoint.endpoint.method)}, path: ${path}${parts.length === 0 ? "" : `, ${parts.join(", ")}`}, successStatus: ${resolveHttpApiStatus(endpoint.successes[0].ast) ?? 200}, declaredStatuses: [${declaredStatuses.join(", ")}], empty: ${endpoint.operation.success === "void"}${isBinarySchema(endpoint.successes[0]) ? ", binary: true" : ""} }`
+      const descriptor = `{ method: ${JSON.stringify(endpoint.endpoint.method)}, path: ${path}${parts.length === 0 ? "" : `, ${parts.join(", ")}`}, successStatus: ${resolveHttpApiStatus(endpoint.successes[0].ast) ?? 200}, declaredStatuses: [${declaredStatuses.join(", ")}], empty: ${endpoint.operation.success === "void"}${isBinarySchema(endpoint.successes[0]) ? ", binary: true" : ""}${isBinaryPayload(endpoint) ? ", binaryBody: true" : ""} }`
       if (endpoint.operation.success === "stream") {
         const success = endpoint.successes[0]
         if (!isStreamSchema(success) || success._tag !== "StreamSse" || success.sseMode !== "data") {
@@ -1235,13 +1241,33 @@ function normalizePromiseClientContent(content: string, groups: ReadonlyArray<Gr
         "if (descriptor.binary) return new Uint8Array(await response.arrayBuffer()) as A\n    if (descriptor.empty) {",
       )
     : sseReady
+  const binaryBodyReady = endpoints.some(isBinaryPayload)
+    ? replaceOne(
+        replaceOne(
+          replaceOne(
+            binaryReady,
+            "readonly body?: unknown\n",
+            "readonly body?: unknown\n  readonly binaryBody?: true\n",
+          ),
+          'if (descriptor.body !== undefined && !headers.has("content-type")) headers.set("content-type", "application/json")',
+          'if (descriptor.body !== undefined && !headers.has("content-type"))\n      headers.set("content-type", descriptor.binaryBody ? "application/octet-stream" : "application/json")',
+        ),
+        "body: descriptor.body === undefined ? undefined : JSON.stringify(descriptor.body),",
+        "body:\n          descriptor.body === undefined\n            ? undefined\n            : descriptor.binaryBody\n              ? (descriptor.body as RequestInit[\"body\"])\n              : JSON.stringify(descriptor.body),",
+      )
+    : binaryReady
   return usesWildcard
     ? replaceOne(
-        binaryReady,
+        binaryBodyReady,
         "function appendQuery(params: URLSearchParams, key: string, value: unknown): void {",
         'function encodePath(value: string): string {\n  return value.split("/").map(encodeURIComponent).join("/")\n}\n\nfunction appendQuery(params: URLSearchParams, key: string, value: unknown): void {',
       )
-    : binaryReady
+    : binaryBodyReady
+}
+
+function isBinaryPayload(endpoint: Endpoint) {
+  const payload = endpoint.payloads[0]
+  return payload !== undefined && resolveHttpApiEncoding(payload.ast)?._tag === "Uint8Array"
 }
 
 function replaceOne(input: string, search: string, replacement: string) {
@@ -1720,6 +1746,7 @@ function streamDataSchema(schema: Extract<HttpApiSchema.StreamSchema, { readonly
 }
 
 function streamEncodedDataSchema(schema: Extract<HttpApiSchema.StreamSchema, { readonly _tag: "StreamSse" }>) {
+  // oxlint-disable-next-line no-restricted-globals -- Effect exposes this runtime helper without a public type.
   const replaceEncoding: unknown = Reflect.get(SchemaAST, "replaceEncoding")
   if (typeof replaceEncoding !== "function") throw new GenerationError({ reason: "Invalid SSE data schema" })
   const ast: unknown = replaceEncoding(streamDataAst(schema.events.ast), undefined)

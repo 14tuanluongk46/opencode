@@ -1,10 +1,11 @@
-import type { AgentSideConnection, PromptResponse, SessionUpdate } from "@agentclientprotocol/sdk"
+import type { PromptResponse, SessionUpdate } from "@agentclientprotocol/sdk"
 import type {
   EventSubscribeOutput,
   OpenCodeClient,
   SessionMessageAssistant,
   SessionMessageInfo,
 } from "@opencode/client/promise"
+import type { ACPConnection } from "./connection"
 import { partsToContentChunks, type ReplayPart } from "./content"
 import { ACPError } from "./error"
 import { replyPermission, syncEditedFiles } from "./permission"
@@ -17,11 +18,11 @@ import {
   type ToolInput,
 } from "./tool"
 
-type Connection = Pick<AgentSideConnection, "sessionUpdate" | "requestPermission"> &
-  Partial<Pick<AgentSideConnection, "writeTextFile">>
+type Connection = Pick<ACPConnection.Connection, "sessionUpdate" | "requestPermission" | "writeTextFile">
 
 export type TurnControl = {
   cancelled: boolean
+  // Aborted whenever the turn is cancelled or closed, so it also cancels the turn's outbound client requests.
   readonly admission: AbortController
 }
 
@@ -160,12 +161,13 @@ export async function streamTurn(input: {
           clientSessionID: input.sessionID,
           cwd: input.cwd,
           tool,
+          signal: control.admission.signal,
           ...(child ? { toolCallPrefix: child.id, titlePrefix: child.title } : {}),
         })
         continue
       }
       if (event.type === "form.created" && (event.data.form.sessionID === input.sessionID || child)) {
-        await input.client.form
+        await input.client.session.form
           .cancel({ sessionID: event.data.form.sessionID, formID: event.data.form.id })
           .catch(() => input.client.session.interrupt({ sessionID: event.data.form.sessionID }).catch(() => {}))
         continue
@@ -201,7 +203,7 @@ export async function streamTurn(input: {
         if (!child) assistantMessageID = event.data.assistantMessageID
         await send({
           sessionUpdate: "agent_thought_chunk",
-          messageId: event.data.assistantMessageID,
+          messageId: `${event.data.assistantMessageID}:reasoning:${event.data.ordinal}`,
           content: { type: "text", text: event.data.delta },
         })
         continue
@@ -269,6 +271,7 @@ export async function streamTurn(input: {
           toolName: current.name,
           toolInput: current.input,
           metadata: event.data.metadata ?? {},
+          signal: control.admission.signal,
         }).catch(() => {})
         await send({
           sessionUpdate: "tool_call_update",
@@ -369,7 +372,7 @@ export async function streamTurn(input: {
     }
     const assistant = assistantMessageID
       ? await input.client.session
-          .message({ sessionID: input.sessionID, messageID: assistantMessageID })
+          .message.get({ sessionID: input.sessionID, messageID: assistantMessageID })
           .catch(() => undefined)
       : undefined
     return response(
@@ -417,7 +420,7 @@ function projectChildUpdate(update: SessionUpdate, child: ChildSession) {
 }
 
 export async function replayMessages(
-  connection: Pick<AgentSideConnection, "sessionUpdate">,
+  connection: Pick<Connection, "sessionUpdate">,
   sessionID: string,
   cwd: string,
   messages: readonly SessionMessageInfo[],
@@ -426,7 +429,7 @@ export async function replayMessages(
 }
 
 async function replayMessage(
-  connection: Pick<AgentSideConnection, "sessionUpdate">,
+  connection: Pick<Connection, "sessionUpdate">,
   sessionID: string,
   cwd: string,
   message: SessionMessageInfo,
@@ -455,6 +458,8 @@ async function replayMessage(
     return
   }
   if (message.type !== "assistant") return
+  // Live reasoning ordinals count only reasoning parts, not the mixed content array.
+  let reasoningOrdinal = 0
   for (const part of message.content) {
     if (part.type === "text") {
       await connection.sessionUpdate({
@@ -472,7 +477,7 @@ async function replayMessage(
         sessionId: sessionID,
         update: {
           sessionUpdate: "agent_thought_chunk",
-          messageId: message.id,
+          messageId: `${message.id}:reasoning:${reasoningOrdinal++}`,
           content: { type: "text", text: part.text },
         },
       })

@@ -37,6 +37,7 @@ export type ComposerEditorView = {
   agent?: ComposerSelectControl
   variant?: ComposerSelectControl
   submit: {
+    available?: Accessor<boolean>
     stopping: Accessor<boolean>
     working?: Accessor<boolean>
     queue?: ComposerQueue
@@ -333,6 +334,7 @@ export function createComposerEditor(input: {
       draft.removeAttachment(id)
     },
     canSubmit() {
+      if (input.view.submit.available?.() === false) return false
       if (input.view.draftOnly) return false
       const persisted = draft.state
       if (state.mode === "shell") {
@@ -365,6 +367,7 @@ export function createComposerEditor(input: {
       dispatch({ type: "mode.shell" })
     },
     submit(options?: { alternate?: boolean }) {
+      if (input.view.submit.available?.() === false) return
       if (input.view.draftOnly) return
       input.view.submit.onSubmit(options)
       dispatch({ type: "popover.close" })
@@ -381,20 +384,20 @@ export function createComposerEditor(input: {
     },
     onPaste(event: ClipboardEvent) {
       const clipboard = event.clipboardData
-      if (
-        attachments &&
-        (Array.from(clipboard?.items ?? []).some((item) => item.kind === "file") || !clipboard?.getData("text/plain"))
-      ) {
+      const text = clipboard?.getData("text/plain")
+      if (attachments && shouldHandlePasteAsAttachment(clipboard, !!input.attachments?.readClipboardImage)) {
         void attachments.handlePaste(event)
         return
       }
-      const text = clipboard?.getData("text/plain").replace(/\r\n?/g, "\n")
       if (!text) return
       event.preventDefault()
       // insertText emits input events per line, repeatedly parsing and saving the draft.
       // Escaped HTML inserts multiline text once and preserves native selection and undo.
-      const multiline = text.includes("\n")
-      const value = multiline ? text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;") : text
+      const normalized = text.replace(/\r\n?/g, "\n")
+      const multiline = normalized.includes("\n")
+      const value = multiline
+        ? normalized.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+        : normalized
       if (
         typeof document.execCommand === "function" &&
         document.execCommand(multiline ? "insertHTML" : "insertText", false, value)
@@ -405,13 +408,13 @@ export function createComposerEditor(input: {
       if (!(target instanceof HTMLElement) || !selection?.rangeCount || !target.contains(selection.anchorNode)) return
       const range = selection.getRangeAt(0)
       range.deleteContents()
-      const node = document.createTextNode(text)
+      const node = document.createTextNode(normalized)
       range.insertNode(node)
       range.setStartAfter(node)
       range.collapse(true)
       selection.removeAllRanges()
       selection.addRange(range)
-      target.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertFromPaste", data: text }))
+      target.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertFromPaste", data: normalized }))
     },
     onDragEnter(event: DragEvent) {
       event.preventDefault()
@@ -446,6 +449,12 @@ export function createComposerEditor(input: {
 }
 
 export type ComposerEditorModel = ReturnType<typeof createComposerEditor>
+
+export function shouldHandlePasteAsAttachment(clipboard: DataTransfer | null, readClipboardImage: boolean) {
+  if (Array.from(clipboard?.items ?? []).some((item) => item.kind === "file")) return true
+  if (Array.from(clipboard?.types ?? []).some((type) => type.startsWith("text/"))) return false
+  return readClipboardImage
+}
 
 function canNavigateHistory(direction: "up" | "down", text: string, cursor: number, inHistory: boolean) {
   const position = Math.max(0, Math.min(cursor, text.length))

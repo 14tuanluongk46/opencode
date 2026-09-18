@@ -26,7 +26,7 @@ import type {
   SessionMessageCompaction,
   SessionMessageUser,
 } from "@opencode/client/promise"
-import type { SessionUserActions, SessionUserComment } from "../actions"
+import type { SessionUserActions, SessionUserAttachmentReference, SessionUserComment } from "../actions"
 import { typeLabel } from "../components/message-file"
 
 export async function writeClipboard(text: string): Promise<boolean> {
@@ -208,12 +208,14 @@ export function CurrentUserMessageDisplay(props: {
   model: SessionMessageAssistant["model"]
   actions?: SessionUserActions
   comments?: SessionUserComment[]
+  references?: SessionUserAttachmentReference[]
 }) {
   const data = useData()
   const dialog = useDialog()
   const i18n = useI18n()
   const [state, setState] = createStore({ copied: false, reverting: false })
   const attachments = createMemo(() => (props.message.files ?? []).filter((file) => !file.mention))
+  const references = createMemo(() => props.references ?? [])
   const inlineFiles = createMemo(() => (props.message.files ?? []).filter((file) => !!file.mention))
   const agents = createMemo(() => props.message.agents ?? [])
   const comments = createMemo(() => props.comments ?? [])
@@ -242,8 +244,15 @@ export function CurrentUserMessageDisplay(props: {
     }
   }
   const renderAttachments = () => (
-    <Show when={attachments().length > 0}>
+    <Show when={attachments().length > 0 || references().length > 0}>
       <div data-slot="user-message-attachments">
+        <For each={references()}>
+          {(file) => (
+            <AttachmentCard title={file.name} hover={file.path}>
+              {typeLabel(file.name, file.mime, i18n.t("ui.common.file"))}
+            </AttachmentCard>
+          )}
+        </For>
         <For each={attachments()}>
           {(file) => {
             const url = () => (file.source.type === "uri" ? file.source.uri : `data:${file.mime};base64,${file.data}`)
@@ -372,7 +381,18 @@ function CurrentHighlightedText(props: {
     if (last < props.text.length) result.push({ text: props.text.slice(last) })
     return result
   })
-  return <For each={segments()}>{(segment) => <span data-highlight={segment.type}>{segment.text}</span>}</For>
+  return (
+    <For each={segments()}>
+      {(segment) => (
+        <span data-highlight={segment.type}>
+          <Show when={segment.type && segment.text.startsWith("@")} fallback={segment.text}>
+            <span data-slot="user-message-mention-prefix">@</span>
+            {segment.text.slice(1)}
+          </Show>
+        </span>
+      )}
+    </For>
+  )
 }
 
 type HighlightSegment = { text: string; type?: "file" | "agent" }
@@ -381,20 +401,40 @@ export function SessionCompactionMessage(props: { message: SessionMessageCompact
   const i18n = useI18n()
   const summary = () => (props.message.status === "failed" ? "" : props.message.summary)
   const error = () => {
-    if (props.message.status !== "failed" || props.message.error.type === "aborted") return ""
+    if (props.message.status !== "failed") return ""
+    if (props.message.error.type === "aborted" || props.message.error.type === "compaction.interrupted") return ""
     return props.error
   }
+  const compact = createMemo(
+    () => new Intl.NumberFormat(i18n.locale(), { notation: "compact", maximumFractionDigits: 1 }),
+  )
+  // Usage of the compaction request itself; the resulting context size only shows on the next assistant step.
+  const usage = () => {
+    if (props.message.status === "running" || !props.message.tokens) return ""
+    const tokens = props.message.tokens
+    const input = tokens.input + tokens.cache.read + tokens.cache.write
+    const output = tokens.output + tokens.reasoning
+    if (input + output <= 0) return ""
+    return i18n.t("ui.messagePart.compaction.usage", {
+      input: compact().format(input),
+      output: compact().format(output),
+    })
+  }
+  const outcome = () => {
+    if (props.message.status !== "failed")
+      return props.message.status === "completed" && props.message.providerContext
+        ? "ui.messagePart.providerCompaction"
+        : "ui.messagePart.compaction"
+    if (props.message.error.type === "aborted") return "ui.messagePart.compaction.cancelled"
+    if (props.message.error.type === "compaction.interrupted") return "ui.messagePart.compaction.interrupted"
+    return "ui.messagePart.compaction.failed"
+  }
+  const label = createMemo(() => [i18n.t(outcome()), usage()].filter(Boolean).join(" · "))
 
   return (
     <div data-component="session-compaction-message">
       <div class="py-2">
-        <TimelineSeparator
-          label={i18n.t(
-            props.message.status === "completed" && props.message.providerContext
-              ? "ui.messagePart.providerCompaction"
-              : "ui.messagePart.compaction",
-          )}
-        />
+        <TimelineSeparator label={i18n.t("ui.messagePart.compaction.started")} />
       </div>
       <Show when={summary().trim()}>
         <div data-component="text-part" data-timeline-part-id={props.message.id}>
@@ -405,6 +445,22 @@ export function SessionCompactionMessage(props: { message: SessionMessageCompact
               streaming={props.message.status === "running"}
             />
           </div>
+        </div>
+      </Show>
+      <Show when={props.message.status === "running"}>
+        <div role="status" class="py-2">
+          <BasicTool
+            icon="archive"
+            trigger={{ title: i18n.t("ui.messagePart.compaction.running") }}
+            status="running"
+            locked
+            hideDetails
+          />
+        </div>
+      </Show>
+      <Show when={props.message.status !== "running"}>
+        <div class="py-2">
+          <TimelineSeparator label={label()} />
         </div>
       </Show>
       <Show when={error()}>

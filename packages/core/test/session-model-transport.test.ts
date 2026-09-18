@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { AIError, HttpContext, TransportError } from "@opencode/ai"
+import { AIError, HttpContext, InvalidRequestError, TransportError } from "@opencode/ai"
 import type {
   ChannelObservation,
   WebSocketChannelExchange,
@@ -171,6 +171,62 @@ describe("SessionModelTransport", () => {
     )
   })
 
+  test("selects the connection from the handshake and reopens when it changes", async () => {
+    const fixture = automatic()
+    const tokens = ["one", "one", "two"]
+    await run(
+      fixture.connector,
+      Effect.gen(function* () {
+        const transport = yield* SessionModelTransport.Service
+        const executor = transport.bind(session, {
+          handshake: (connect) =>
+            Effect.succeed({
+              url: connect.url,
+              headers: { ...connect.headers, authorization: `Bearer ${tokens.shift()}` },
+            }),
+        })
+        yield* collect(executor, exchange("first", { headers: { "api-key": "k" } }))
+        yield* collect(executor, exchange("second", { headers: { "api-key": "k" } }))
+        yield* collect(executor, exchange("third", { headers: { "api-key": "k" } }))
+
+        // Same minted token reuses the socket; a rotated token changes the affinity key and reopens it.
+        expect(fixture.connections).toHaveLength(2)
+        expect(fixture.connections.map((item) => item.headers.authorization)).toEqual(["Bearer one", "Bearer two"])
+        expect(fixture.connections.map((item) => item.sent)).toEqual([["first", "second"], ["third"]])
+      }),
+    )
+  })
+
+  test("sends the frame the send tap returns and observes the frame the receive tap returns", async () => {
+    const fixture = automatic()
+    const seen: Array<{ tap: "send" | "receive"; frame: string }> = []
+    await run(
+      fixture.connector,
+      Effect.gen(function* () {
+        const transport = yield* SessionModelTransport.Service
+        const executor = transport.bind(session, {
+          send: (frame) => {
+            seen.push({ tap: "send", frame })
+            return Effect.succeed(`${frame}:rewritten`)
+          },
+          receive: (frame) => {
+            seen.push({ tap: "receive", frame })
+            return Effect.succeed(`${frame}:observed`)
+          },
+        })
+        const frames = yield* collect(executor, exchange("first"))
+
+        // The wire carries the rewritten outbound frame; the driver sees the rewritten inbound frame.
+        expect(fixture.connections.map((item) => item.sent)).toEqual([["first:rewritten"]])
+        expect(frames).toEqual(["completed:first:rewritten:observed"])
+        expect(seen).toEqual([
+          { tap: "send", frame: "first" },
+          { tap: "receive", frame: "completed:first:rewritten" },
+        ])
+      }),
+    )
+  })
+
   test("does not carry a checkpoint across physical connection rotation", async () => {
     const fixture = automatic()
     const checkpoints: Array<unknown> = []
@@ -243,7 +299,9 @@ describe("SessionModelTransport", () => {
         yield* collect(executor, item("retry"))
 
         expect(checkpoints).toEqual([undefined, candidate, undefined])
-        expect(fixture.connections).toHaveLength(1)
+        // Error frames end the connection on some backends, so the full retry uses a fresh one.
+        expect(fixture.connections).toHaveLength(2)
+        expect(fixture.connections[0]?.closed).toBe(1)
       }),
     )
   })
@@ -279,6 +337,35 @@ describe("SessionModelTransport", () => {
         const executor = transport.bind(session)
         yield* Effect.result(collect(executor, rejected))
         yield* collect(executor, exchange("retry"))
+
+        expect(fixture.connections).toHaveLength(2)
+        expect(fixture.connections[0]?.closed).toBe(1)
+      }),
+    )
+  })
+
+  test("closes the connection after a provider error frame so the next call reconnects", async () => {
+    const fixture = automatic()
+    const failed: WebSocketChannelExchange = {
+      ...exchange("failed"),
+      driver: {
+        create: () => Effect.succeed({ message: "failed", mode: "full" }),
+        observe: () =>
+          Effect.succeed({
+            type: "provider-failure",
+            error: new AIError({ reason: new InvalidRequestError({ message: "unsupported model" }) }),
+          }),
+      },
+    }
+
+    await run(
+      fixture.connector,
+      Effect.gen(function* () {
+        const transport = yield* SessionModelTransport.Service
+        const executor = transport.bind(session)
+        const result = yield* Effect.result(collect(executor, failed))
+        expect(result._tag).toBe("Failure")
+        expect(yield* collect(executor, exchange("next"))).toEqual(["completed:next"])
 
         expect(fixture.connections).toHaveLength(2)
         expect(fixture.connections[0]?.closed).toBe(1)
@@ -495,6 +582,23 @@ describe("SessionModelTransport", () => {
     )
   })
 
+  test("times out a hanging connect and falls back to http", async () => {
+    const connector: WebSocketConnector = { open: () => Effect.never }
+
+    await runWithTestClock(
+      connector,
+      Effect.gen(function* () {
+        const transport = yield* SessionModelTransport.Service
+        const running = yield* collect(transport.bind(session), exchange("slow")).pipe(
+          Effect.forkChild({ startImmediately: true }),
+        )
+        yield* Effect.yieldNow
+        yield* TestClock.adjust("10 seconds")
+        expect(yield* Fiber.join(running)).toEqual(["fallback:slow"])
+      }),
+    )
+  })
+
   test("times out an idle accepted request and poisons its socket", async () => {
     const started = Deferred.makeUnsafe<void>()
     const messages = queue<string | Uint8Array, AIError>()
@@ -598,25 +702,31 @@ describe("SessionModelTransport", () => {
     )
   })
 
-  test("falls back once when connection setup fails before send", async () => {
+  test("falls back when connection setup fails and keeps the Session on HTTP", async () => {
+    let attempts = 0
     let fallbacks = 0
-    const connector: WebSocketConnector = { open: () => Effect.fail(error("upgrade rejected", "not-sent")) }
+    const connector: WebSocketConnector = {
+      open: () =>
+        Effect.sync(() => attempts++).pipe(Effect.andThen(Effect.fail(error("upgrade rejected", "not-sent")))),
+    }
 
     await run(
       connector,
       Effect.gen(function* () {
         const transport = yield* SessionModelTransport.Service
-        const result = yield* collect(
-          transport.bind(session),
-          exchange("first", {
+        const executor = transport.bind(session)
+        const item = (id: string) =>
+          exchange(id, {
             fallback: () => {
               fallbacks++
               return Stream.make("http")
             },
-          }),
-        )
-        expect(result).toEqual(["http"])
-        expect(fallbacks).toBe(1)
+          })
+        expect(yield* collect(executor, item("first"))).toEqual(["http"])
+        expect(yield* collect(executor, item("second"))).toEqual(["http"])
+        // One failed upgrade per Session, not one per step.
+        expect(attempts).toBe(1)
+        expect(fallbacks).toBe(2)
       }),
     )
   })

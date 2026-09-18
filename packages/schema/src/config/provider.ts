@@ -42,6 +42,9 @@ class Limit extends Schema.Class<Limit>("Config.Model.Limit")({
 
 class Model extends Schema.Class<Model>("Config.Model")({
   compaction: Provider.Compaction.pipe(optional),
+  transport: Provider.Transport.pipe(optional).annotate({
+    description: "Session transport for this model. Defaults to the provider transport.",
+  }),
   modelID: ID.pipe(optional),
   family: Family.pipe(optional),
   name: Schema.String.pipe(optional),
@@ -60,6 +63,10 @@ class Model extends Schema.Class<Model>("Config.Model")({
 
 export class Info extends Schema.Class<Info>("Config.Provider")({
   compaction: Provider.Compaction.pipe(optional),
+  transport: Provider.Transport.pipe(optional).annotate({
+    description:
+      "Session transport for this provider's models. Defaults to the built-in policy; \"websocket\" on a route without a WebSocket channel warns and falls back to HTTP.",
+  }),
   canonical: Provider.ID.pipe(optional),
   name: Schema.String.pipe(optional),
   env: Schema.String.pipe(Schema.Array, optional),

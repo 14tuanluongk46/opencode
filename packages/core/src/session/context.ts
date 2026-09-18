@@ -1,9 +1,9 @@
 export * as SessionContext from "./context.js"
 
-import { Model } from "@opencode/schema/model"
+import { Model } from "../model.js"
+import { Permission } from "../permission.js"
 import { Context, Effect, Layer } from "effect"
 import { Agent } from "../agent.js"
-import { Catalog } from "../catalog.js"
 import { CodeModeInstructions } from "../codemode/instructions.js"
 import { Database } from "../database/database.js"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
@@ -65,7 +65,7 @@ export interface Interface {
       }
     | undefined
   >
-  readonly prepare: SessionModelRequest.Interface["prepare"]
+  readonly request: SessionModelRequest.Interface
 }
 
 /** Location-scoped model-context loader for durable Session Steps. */
@@ -76,7 +76,7 @@ const layer = Layer.effect(
   Effect.gen(function* () {
     const agents = yield* Agent.Service
     const builtins = yield* InstructionBuiltIns.Service
-    const catalog = yield* Catalog.Service
+    const model = yield* Model.Service
     const db = (yield* Database.Service).db
     const discovery = yield* InstructionDiscovery.Service
     const entries = yield* InstructionEntry.Service
@@ -84,22 +84,22 @@ const layer = Layer.effect(
     const mcpInstructions = yield* McpInstructions.Service
     const mcpTools = yield* McpTool.Service
     const models = yield* SessionRunnerModel.Service
-    const modelRequests = yield* SessionModelRequest.Service
+    const request = yield* SessionModelRequest.Service
     const referenceInstructions = yield* ReferenceInstructions.Service
     const skillInstructions = yield* SkillInstructions.Service
     const store = yield* SessionStore.Service
     const registry = yield* Tool.Service
 
-    const resolveModel = (session: SessionSchema.Info) => models.resolve(session, catalog.model.available)
+    const resolveModel = (session: SessionSchema.Info) => models.resolve(session, model.available)
 
     const selectTitle = Effect.fn("SessionContext.selectTitle")(function* (session: SessionSchema.Info) {
       const agent = yield* agents.get(Agent.ID.make("title"))
       if (!agent) return
       const primary = yield* resolveModel(session).pipe(Effect.orElseSucceed(() => undefined))
       const info = yield* Effect.gen(function* () {
-        if (agent.model) return yield* catalog.model.get(agent.model.providerID, agent.model.id)
+        if (agent.model) return yield* model.get(agent.model.providerID, agent.model.id)
         if (!primary) return
-        return yield* catalog.model.small(primary.ref.providerID)
+        return yield* model.small(primary.ref.providerID)
       })
       const variant =
         agent.model?.variant ?? MINIMAL_REASONING_VARIANTS.find((id) => info?.variants.some((item) => item.id === id))
@@ -129,7 +129,7 @@ const layer = Layer.effect(
       if (!agent.info) return yield* new AgentNotFoundError({ sessionID: session.id, agent: session.agent ?? agent.id })
       const loaded = yield* Effect.all(
         {
-          tools: registry.snapshot(agent.info.permissions),
+          tools: registry.snapshot(Permission.merge(agent.info.permissions, session.permissions ?? [])),
           builtins: builtins.load(sessionID),
           discovery: discovery.load(),
           skills: skillInstructions.load(agent),
@@ -173,7 +173,7 @@ const layer = Layer.effect(
       }
     })
 
-    return Service.of({ select, load, resolveModel, selectTitle, prepare: modelRequests.prepare })
+    return Service.of({ select, load, resolveModel, selectTitle, request })
   }),
 )
 
@@ -185,7 +185,7 @@ export const node = makeLocationNode({
   layer,
   deps: [
     Agent.node,
-    Catalog.node,
+    Model.node,
     Database.node,
     InstructionBuiltIns.node,
     InstructionDiscovery.node,

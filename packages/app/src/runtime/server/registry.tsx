@@ -5,13 +5,11 @@ import { Persist, persisted } from "@/runtime/persistence/storage"
 import { pathKey } from "@/workspaces/path-key"
 import { ServerScope } from "@/runtime/server/scope"
 import { ServerHttp, ServerHttpBase, ServerKey, serverState } from "./persistence"
+import type { SshItem } from "@/servers/ssh/types"
 
 type ServerState = ReturnType<typeof serverState>["current"]["Type"]
-// The store retains more history than is displayed. Consumers filter recently closed entries
-// against the live project list (dropping deleted projects) and then cap the visible count via
-// RECENTLY_CLOSED_DISPLAY_LIMIT. Retaining extra history ensures entries that are temporarily
-// filtered out do not evict still-visible ones from the persisted store.
-const RECENTLY_CLOSED_HISTORY_LIMIT = 16
+// Retain closed paths until reopened so settings can exclude them from the server inventory.
+// The Home page independently limits the visible recently closed entries.
 export const RECENTLY_CLOSED_DISPLAY_LIMIT = 5
 
 export function normalizeServerUrl(input: string) {
@@ -24,6 +22,7 @@ export function normalizeServerUrl(input: string) {
 export function serverName(conn?: ServerConnection.Any, ignoreDisplayName = false) {
   if (!conn) return ""
   if (conn.displayName && !ignoreDisplayName) return conn.displayName
+  if (conn.type === "ssh") return conn.host
   return conn.http.url.replace(/^https?:\/\//, "").replace(/\/+$/, "")
 }
 
@@ -49,6 +48,7 @@ export function createServerProjects(input: {
   }
   return {
     list: current,
+    closed: currentClosed,
     recentlyClosed: currentClosed,
     remove,
     open(directory: string) {
@@ -70,10 +70,7 @@ export function createServerProjects(input: {
     close(directory: string) {
       remove(directory)
       const key = pathKey(directory)
-      const closed = [directory, ...currentClosed().filter((worktree) => pathKey(worktree) !== key)].slice(
-        0,
-        RECENTLY_CLOSED_HISTORY_LIMIT,
-      )
+      const closed = [directory, ...currentClosed().filter((worktree) => pathKey(worktree) !== key)]
       setStore("recentlyClosed", input.scope(), closed)
     },
     expand(directory: string) {
@@ -159,9 +156,14 @@ export namespace ServerConnection {
   // Remote server desktop can SSH into
   export type Ssh = {
     type: "ssh"
+    stage?: SshItem["stage"]
+    connecting?: boolean
+    authenticationRequired?: boolean
+    id?: string
     host: string
     // SSH client exposes an HTTP server for the app to use as a proxy
     http: HttpBase
+    reconnect?: (signal: AbortSignal) => Promise<HttpBase>
   } & Base
 
   export type Any =
@@ -178,7 +180,7 @@ export namespace ServerConnection {
         return Key.make("sidecar")
       }
       case "ssh":
-        return Key.make(`ssh:${conn.host}`)
+        return Key.make(`ssh:${conn.id ?? conn.host}`)
     }
   }
 
@@ -194,7 +196,7 @@ export const { use: useServers, provider: ServersProvider } = createSimpleContex
   name: "Server",
   gate: true,
   init: (props: {
-    defaultServer: ServerConnection.Key
+    defaultServer?: ServerConnection.Key
     canonicalLocalServer?: ServerConnection.Key
     servers?: Array<ServerConnection.Any>
   }) => {

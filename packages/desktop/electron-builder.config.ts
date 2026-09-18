@@ -104,6 +104,9 @@ const getBase = (appId: string): Configuration => ({
   mac: {
     category: "public.app-category.developer-tools",
     icon: `resources/icons/icon.icns`,
+    extendInfo: {
+      NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac: true,
+    },
     hardenedRuntime: true,
     gatekeeperAssess: false,
     entitlements: "resources/entitlements.plist",
@@ -174,7 +177,7 @@ function getConfig() {
         protocols: { name: "OpenCode Beta", schemes: ["opencode"] },
         publish: {
           provider: "generic",
-          url: "https://opencode.ai/update/api/beta/desktop/github/",
+          url: "https://opencode.ai/update/api/beta/desktop/opencode/",
           channel: "latest",
         },
         deb: { fpm: [metainfoFpm(appId)] },
@@ -189,7 +192,7 @@ function getConfig() {
         protocols: { name: "OpenCode", schemes: ["opencode"] },
         publish: {
           provider: "generic",
-          url: "https://opencode.ai/update/api/latest/desktop/github/",
+          url: "https://opencode.ai/update/api/latest/desktop/opencode/",
           channel: "latest",
         },
         deb: { fpm: [metainfoFpm(appId), legacyDesktopEntryFpm] },

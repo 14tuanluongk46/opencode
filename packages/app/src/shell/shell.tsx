@@ -8,6 +8,8 @@ import { ToastRegion } from "@/shell/notifications/toast"
 import { TitlebarRightProvider } from "@/shell/titlebar/right-slot"
 import { useSettingsSurface } from "@/settings/surface"
 import { useSettings } from "@/settings/model"
+import { SshAuthentication } from "@/servers/ssh/authentication"
+import { useUpdaterInstall } from "@/shell/updates/download"
 
 const DebugBar = lazy(() => import("@/shell/debug/debug-bar").then((module) => ({ default: module.DebugBar })))
 
@@ -15,6 +17,7 @@ export default function Layout(props: ParentProps) {
   const platform = usePlatform()
   const settings = useSettingsSurface()
   const preferences = useSettings()
+  const installUpdate = useUpdaterInstall()
   const mobile = createMediaQuery("(max-width: 767px)")
   const [state, setState] = createStore({
     debugTools: false,
@@ -25,16 +28,20 @@ export default function Layout(props: ParentProps) {
   const bottomTitlebar = () => mobile() && preferences.general.mobileTitlebarPosition() === "bottom"
 
   const update: TitlebarUpdate = {
-    get version() {
-      const state = platform.updater?.state()
-      if (state?.status !== "ready") return undefined
-      return state.version
+    get state() {
+      return platform.updater?.state()
     },
-    get installing() {
-      return platform.updater?.state().status === "installing"
-    },
-    install: () => void platform.updater?.install(),
+    install: installUpdate,
   }
+  // A plain object avoids the compiler's conditional-prop memo, which leaks when read from event handlers.
+  const debugTools = import.meta.env.DEV
+    ? {
+        get visible() {
+          return state.debugTools
+        },
+        toggle: () => setState("debugTools", (value) => !value),
+      }
+    : undefined
 
   return (
     <TitlebarRightProvider>
@@ -55,11 +62,7 @@ export default function Layout(props: ParentProps) {
         <Titlebar
           update={update}
           verticalTabs={verticalTabs() ? { mount: state.tabsMount } : undefined}
-          debugTools={
-            import.meta.env.DEV
-              ? { visible: state.debugTools, toggle: () => setState("debugTools", (value) => !value) }
-              : undefined
-          }
+          debugTools={debugTools}
         />
         <div class="flex flex-1 min-h-0 min-w-0 flex-row">
           <Show when={verticalTabs()}>
@@ -97,9 +100,9 @@ export default function Layout(props: ParentProps) {
               "--settings-top-inset": mobile() && !bottomTitlebar() ? "0px" : "var(--shell-top-inset, 8px)",
             }}
           >
-            <div class="flex size-full min-h-0 min-w-0 flex-col">
+            <SshAuthentication>
               <Suspense>{props.children}</Suspense>
-            </div>
+            </SshAuthentication>
           </main>
         </div>
         <Show when={import.meta.env.DEV && state.debugTools}>

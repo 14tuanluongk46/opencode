@@ -79,7 +79,7 @@ it.effect("repairs tool input before validating its original schema", () =>
           call: { type: "tool-call", id: "call-removed", name: "repairable", input: {} },
         })
         .pipe(Effect.flip)).message,
-    ).toBe("Unknown tool: repairable")
+    ).toBe('No tool named "repairable" is currently available. Please use a tool from the available tool list.')
   }),
 )
 

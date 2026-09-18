@@ -146,7 +146,7 @@ export function createHomeSessionsController(home: HomeController) {
     const next = title.trim()
     if (!next || next === sessionLabel(session)) return true
     return ctx.sdk.api.session
-      .rename({ sessionID: session.id, title: next })
+      .update({ sessionID: session.id, title: next })
       .then(() => {
         ctx.data.session.remember({ ...(ctx.data.session.get(session.id) ?? session), title: next })
         // Rename advances time.updated server-side; re-sync the canonical
@@ -311,8 +311,10 @@ export function createHomeSessionsController(home: HomeController) {
         dialog.show(() => <DeleteDialog server={server} session={session} />),
     },
     tab: {
-      isOpen: (record: HomeSessionRecord) =>
-        sessionHasOpenTab(tabs.store, home.selection.value().server, record.session),
+      isOpen: (record: HomeSessionRecord) => {
+        const server = home.selection.value().server
+        return !!server && sessionHasOpenTab(tabs.store, server, record.session)
+      },
     },
   }
 }

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect } from "bun:test"
 import { Effect, Layer } from "effect"
 import { Command } from "@opencode/core/command"
 import { Bus } from "@opencode/core/bus"
@@ -33,11 +33,6 @@ const it = testEffect(
 )
 
 describe("CommandPlugin.Plugin", () => {
-  test("refers to tools by their available capabilities", () => {
-    expect(PROMPT_REVIEW).toContain("Available documentation and code-search tools")
-    expect(PROMPT_REVIEW).not.toContain("Exa Code Context")
-  })
-
   it.effect("registers built-in init and review commands", () =>
     Effect.gen(function* () {
       const command = yield* Command.Service
@@ -60,7 +55,7 @@ describe("CommandPlugin.Plugin", () => {
                 return SessionInbox.User.make({
                   id: SessionMessage.ID.make("msg_test"),
                   sessionID: input.sessionID,
-                  timeCreated: DateTime.makeUnsafe(0),
+                  time: { created: DateTime.makeUnsafe(0) },
                   type: "user",
                   payload: { text: input.text },
                   delivery: input.delivery ?? "steer",

@@ -95,7 +95,6 @@ export const Info = Schema.Struct({
   ).annotate({ description: "Scrolling behavior" }),
   attention: Schema.optional(
     Schema.Struct({
-      enabled: Schema.optional(Schema.Boolean).annotate({ description: "Enable attention alerts" }),
       notifications: Schema.optional(Schema.Boolean).annotate({ description: "Show system notifications" }),
       sound: Schema.optional(Schema.Boolean).annotate({ description: "Play attention sounds" }),
       volume: Schema.optional(
@@ -148,7 +147,6 @@ export const Info = Schema.Struct({
       sidebar: Schema.optional(Schema.Literals(["auto", "hide"])).annotate({
         description: "Session sidebar visibility; 'auto' shows it when space permits",
       }),
-      terminal: Schema.optional(Schema.Boolean).annotate({ description: "Enable persistent session terminal panes" }),
       scrollbar: Schema.optional(Schema.Boolean).annotate({ description: "Show the session transcript scrollbar" }),
       thinking: Schema.optional(Schema.Literals(["show", "hide"])).annotate({
         description: "Show or hide model reasoning by default",
@@ -167,6 +165,9 @@ export const Info = Schema.Struct({
       }),
       new_location: Schema.optional(Schema.Literals(["launch", "inherit"])).annotate({
         description: "Start new sessions in the TUI launch directory or inherit the active session location",
+      }),
+      permissions: Schema.optional(Schema.Literals(["prompt", "autoaccept"])).annotate({
+        description: "Prompt for permission requests or accept them automatically",
       }),
     }),
   ).annotate({ description: "Session transcript presentation settings" }),
@@ -190,6 +191,9 @@ export const Info = Schema.Struct({
     Schema.Struct({
       thinking: Schema.optional(Schema.Literals(["show", "hide"])).annotate({
         description: "Show or hide model reasoning",
+      }),
+      tools: Schema.optional(Schema.Literals(["show", "hide"])).annotate({
+        description: "Show or hide tool calls and the assistant text that precedes them",
       }),
       shell_output: Schema.optional(Schema.Literals(["show", "hide"])).annotate({
         description: "Show or hide raw shell tool output",
@@ -237,7 +241,6 @@ export type Info = Schema.Schema.Type<typeof Info>
 
 export type Resolved = Omit<Info, "attention" | "cursor" | "keybinds" | "leader" | "mouse" | "session" | "tabs"> & {
   attention: {
-    enabled: boolean
     notifications: boolean
     sound: boolean
     volume: number
@@ -251,8 +254,10 @@ export type Resolved = Omit<Info, "attention" | "cursor" | "keybinds" | "leader"
     style: "block" | "underline" | "line" | "default"
     blinking: boolean
   }
-  session: Omit<NonNullable<Info["session"]>, "new_location" | "tps"> & {
+  session: Omit<NonNullable<Info["session"]>, "new_location" | "permissions" | "tps"> & {
     new_location: "launch" | "inherit"
+    permissions: "prompt" | "autoaccept"
+    terminal: boolean
     tps: boolean
   }
   tabs: {
@@ -278,9 +283,8 @@ export function resolve(input: Info, options: { terminalSuspend: boolean }): Res
   return {
     ...input,
     attention: {
-      enabled: input.attention?.enabled ?? false,
-      notifications: input.attention?.notifications ?? true,
-      sound: input.attention?.sound ?? true,
+      notifications: input.attention?.notifications ?? false,
+      sound: input.attention?.sound ?? false,
       volume: input.attention?.volume ?? 0.4,
       sound_pack: input.attention?.sound_pack ?? "opencode.default",
       sounds: input.attention?.sounds ?? {},
@@ -299,8 +303,9 @@ export function resolve(input: Info, options: { terminalSuspend: boolean }): Res
     session: {
       ...input.session,
       new_location: input.session?.new_location ?? "launch",
+      permissions: input.session?.permissions ?? "prompt",
       // Persistent terminal panes need the opencode-pty daemon, which does not ship Windows binaries.
-      terminal: input.session?.terminal ?? process.platform !== "win32",
+      terminal: process.platform !== "win32",
       tps: input.session?.tps ?? true,
     },
     tabs: {

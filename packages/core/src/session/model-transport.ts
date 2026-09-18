@@ -13,6 +13,7 @@ import {
 import { AIError, AIErrorReason, TransportError, type TransportOperation } from "@opencode/ai"
 import { Hash } from "@opencode/util/hash"
 import { Cause, Clock, Context, Effect, Fiber, Layer, Metric, Queue, Scope, Semaphore, Stream } from "effect"
+import { Headers } from "effect/unstable/http"
 import { Socket } from "effect/unstable/socket"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { SessionSchema } from "./schema.js"
@@ -20,6 +21,7 @@ import { webSocketConstructor } from "../effect/app-node-platform.js"
 
 const ROTATE_AFTER_MS = 55 * 60 * 1000
 const INBOUND_CAPACITY = 128
+const CONNECT_TIMEOUT = "10 seconds"
 const IDLE_TIMEOUT = "5 minutes"
 const events = Metric.counter("opencode_session_websocket_events_total", {
   description: "Session WebSocket lifecycle events",
@@ -51,8 +53,24 @@ interface State {
   channel?: Channel
 }
 
+/** Selects the connection for one exchange. Its output feeds the affinity key, so changed headers reopen the socket. */
+export interface Handshake {
+  readonly url: string
+  readonly headers: Record<string, string>
+}
+
+/**
+ * Per-exchange taps. `handshake` runs before the connection is selected; `send` sees each outbound
+ * frame after the driver builds it; `receive` sees each inbound frame before the driver observes it.
+ */
+export interface Interceptor {
+  readonly handshake?: (connect: Handshake) => Effect.Effect<Handshake>
+  readonly send?: (frame: string) => Effect.Effect<string>
+  readonly receive?: (frame: string) => Effect.Effect<string>
+}
+
 export interface Interface {
-  readonly bind: (sessionID: SessionSchema.ID) => WebSocketChannelExecutor
+  readonly bind: (sessionID: SessionSchema.ID, interceptor?: Interceptor) => WebSocketChannelExecutor
   readonly close: (sessionID: SessionSchema.ID) => Effect.Effect<void>
   readonly closeAll: Effect.Effect<void>
 }
@@ -145,6 +163,11 @@ export const makeLayer = (connector: WebSocketConnector) =>
         if (owner.channel === channel) owner.channel = undefined
         if (channel.closing) return
         channel.closing = true
+        yield* Effect.logDebug("session websocket poisoned", {
+          sessionTransport: "websocket",
+          code: error.reason._tag === "Transport" ? error.reason.code : error.reason._tag,
+          active: channel.active !== undefined,
+        })
         if (channel.active) Queue.failCauseUnsafe(channel.active.queue, Cause.fail(error))
         yield* metric(
           error.reason._tag === "Transport" && error.reason.code === "queue-overflow"
@@ -162,7 +185,20 @@ export const makeLayer = (connector: WebSocketConnector) =>
         return yield* Effect.uninterruptibleMask((restore) =>
           Effect.gen(function* () {
             const connection = yield* restore(
-              connector.open(exchange.connect).pipe(Effect.withSpan("SessionModelTransport.connect")),
+              connector.open(exchange.connect).pipe(
+                Effect.timeoutOrElse({
+                  duration: CONNECT_TIMEOUT,
+                  orElse: () =>
+                    transportError("Timed out opening the Session WebSocket", {
+                      url: exchange.connect.url,
+                      operation: "request",
+                      code: "connect-timeout",
+                      phase: "connect",
+                      delivery: "not-sent",
+                    }),
+                }),
+                Effect.withSpan("SessionModelTransport.connect"),
+              ),
             )
             if (owner.closed) {
               yield* connection.close
@@ -248,7 +284,8 @@ export const makeLayer = (connector: WebSocketConnector) =>
 
       const start = Effect.fn("SessionModelTransport.start")(function* (
         owner: State,
-        exchange: WebSocketChannelExchange,
+        input: WebSocketChannelExchange,
+        interceptor?: Interceptor,
       ) {
         if (owner.closed)
           return yield* transportError("Session WebSocket owner is closed", {
@@ -257,7 +294,13 @@ export const makeLayer = (connector: WebSocketConnector) =>
             phase: "queue",
             delivery: "not-sent",
           })
-        if (owner.httpFallback) return fallback(exchange)
+        if (owner.httpFallback) return fallback(input)
+        const selected = interceptor?.handshake
+          ? yield* interceptor.handshake({ url: input.connect.url, headers: { ...input.connect.headers } })
+          : undefined
+        const exchange: WebSocketChannelExchange = selected
+          ? { ...input, connect: { ...input.connect, url: selected.url, headers: Headers.fromInput(selected.headers) } }
+          : input
         const key = affinity(exchange)
         const now = yield* Clock.currentTimeMillis
         const current = owner.channel
@@ -289,20 +332,22 @@ export const makeLayer = (connector: WebSocketConnector) =>
         const channel = owner.channel
           ? owner.channel
           : yield* open(owner, exchange, key).pipe(
-              Effect.catch((error) =>
-                error.reason._tag === "Transport" && error.reason.code === "owner-closed"
-                  ? Effect.fail(error)
-                  : Effect.logWarning("session websocket connect failed; using http", {
-                      sessionTransport: "websocket",
-                      phase: "connect",
-                      delivery: "not-sent",
-                      code: error.reason._tag === "Transport" ? error.reason.code : error.reason._tag,
-                    }).pipe(
-                      Effect.andThen(metric("connect_failure")),
-                      Effect.andThen(metric("fallback")),
-                      Effect.as(undefined),
-                    ),
-              ),
+              Effect.catch((error) => {
+                if (error.reason._tag === "Transport" && error.reason.code === "owner-closed") return Effect.fail(error)
+                // Any connect failure, transient or not, pins the Session to HTTP until restart or move:
+                // a network that refuses the upgrade would otherwise charge every step for a failed connect.
+                owner.httpFallback = true
+                return Effect.logWarning("session websocket connect failed; using http", {
+                  sessionTransport: "websocket",
+                  phase: "connect",
+                  delivery: "not-sent",
+                  code: error.reason._tag === "Transport" ? error.reason.code : error.reason._tag,
+                }).pipe(
+                  Effect.andThen(metric("connect_failure")),
+                  Effect.andThen(metric("fallback")),
+                  Effect.as(undefined),
+                )
+              }),
             )
         if (!channel) return fallback(exchange)
 
@@ -316,12 +361,20 @@ export const makeLayer = (connector: WebSocketConnector) =>
           Effect.onInterrupt(() => closeChannel(owner, channel)),
         )
         if (create.mode === "full") channel.checkpoint = undefined
+        const message = interceptor?.send
+          ? yield* interceptor.send(create.message).pipe(Effect.onInterrupt(() => closeChannel(owner, channel)))
+          : create.message
+        yield* Effect.logDebug("session websocket sending", {
+          sessionTransport: "websocket",
+          phase: "send",
+          mode: create.mode,
+        })
         const active: Active = {
           queue: yield* Queue.bounded<string, AIError>(INBOUND_CAPACITY),
           delivery: "send-attempted",
         }
         channel.active = active
-        const sent = yield* channel.connection.sendText(create.message).pipe(
+        const sent = yield* channel.connection.sendText(message).pipe(
           Effect.withSpan("SessionModelTransport.send"),
           Effect.onInterrupt(() => closeChannel(owner, channel)),
           Effect.result,
@@ -362,6 +415,7 @@ export const makeLayer = (connector: WebSocketConnector) =>
                 }),
               ),
           }),
+          Stream.mapEffect((frame) => (interceptor?.receive ? interceptor.receive(frame) : Effect.succeed(frame))),
           Stream.mapEffect((frame) => exchange.driver.observe(create, frame)),
           Stream.tap((observation) =>
             Effect.sync(() => {
@@ -383,8 +437,10 @@ export const makeLayer = (connector: WebSocketConnector) =>
               if (terminal && pending === 0) {
                 yield* metric("terminal", { type: terminal.type })
                 if (terminal.type === "rejected") yield* metric("rejection", { recovery: terminal.recovery })
-                if (terminal.type === "rejected" && terminal.recovery === "rotate-and-retry-full")
-                  yield* closeChannel(owner, channel)
+                // The Codex backend stops serving a connection after any error frame: the next request is
+                // never answered and the socket dies with 1006. api.openai.com keeps it open, so reconnecting
+                // costs one handshake there. Drop the socket after every error so retries never race that.
+                if (terminal.type !== "completed" && terminal.type !== "incomplete") yield* closeChannel(owner, channel)
                 return
               }
               yield* metric("cancellation")
@@ -437,7 +493,7 @@ export const makeLayer = (connector: WebSocketConnector) =>
         return { frames, complete, http: channel.connection.http }
       })
 
-      const bind = (sessionID: SessionSchema.ID): WebSocketChannelExecutor => ({
+      const bind = (sessionID: SessionSchema.ID, interceptor?: Interceptor): WebSocketChannelExecutor => ({
         execute: (exchange) => {
           const owner = state(sessionID)
           let execution: WebSocketChannelExecution | undefined
@@ -447,7 +503,7 @@ export const makeLayer = (connector: WebSocketConnector) =>
             },
             frames: Stream.unwrap(
               Effect.acquireRelease(owner.lock.take(1), () => owner.lock.release(1), { interruptible: true }).pipe(
-                Effect.andThen(start(owner, exchange)),
+                Effect.andThen(start(owner, exchange, interceptor)),
                 Effect.tap((started) =>
                   Effect.sync(() => {
                     execution = started

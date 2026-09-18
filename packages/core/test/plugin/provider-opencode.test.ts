@@ -3,8 +3,8 @@ import { LLM } from "@opencode/ai"
 import { LLMClient, RequestExecutor } from "@opencode/ai/route"
 import { Money } from "@opencode/schema/money"
 import { Effect, Layer, Stream } from "effect"
-import { HttpClient, HttpClientResponse } from "effect/unstable/http"
-import { Catalog } from "@opencode/core/catalog"
+import { TestClock } from "effect/testing"
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 import { Credential } from "@opencode/core/credential"
 import { Integration } from "@opencode/core/integration"
 import { Model } from "@opencode/core/model"
@@ -13,7 +13,9 @@ import { Plugin } from "@opencode/core/plugin"
 import { PluginHost } from "@opencode/core/plugin/host"
 import { OpencodePlugin } from "@opencode/core/plugin/provider/opencode"
 import { Provider } from "@opencode/core/provider"
+import { WebSearch } from "@opencode/core/websearch"
 import { withEnv } from "../fixture/env"
+import { drain } from "../lib/clock"
 import { testEffect } from "../lib/effect"
 import { PluginTestLayer } from "./fixture"
 
@@ -25,16 +27,62 @@ const addPlugin = Effect.fn(function* () {
   yield* OpencodePlugin.effect(host)
 })
 
+const noRemoteConfig = HttpClient.make((request) =>
+  Effect.succeed(HttpClientResponse.fromWeb(request, new Response(null, { status: 404 }))),
+)
+
+function consoleServer(orgID: string | null | undefined, unavailable = false) {
+  const config: { authorization: string | null; orgID: string | null }[] = []
+  const requests: string[] = []
+  const server = Bun.serve({
+    port: 0,
+    fetch: async (request) => {
+      const path = new URL(request.url).pathname
+      requests.push(path)
+      if (path === "/auth/device/code") {
+        expect(await request.json()).toEqual({ client_id: "opencode-cli", supports_org_scope: true })
+        return Response.json({
+          device_code: "device",
+          user_code: "user",
+          verification_uri_complete: "/device?user_code=user",
+          expires_in: 60,
+          interval: 0,
+        })
+      }
+      if (path === "/auth/device/token") {
+        return Response.json({ access_token: "access", refresh_token: "refresh", expires_in: 600, org_id: orgID })
+      }
+      if (unavailable && (path === "/api/user" || path === "/api/orgs")) {
+        return new Response("Unavailable", { status: 503 })
+      }
+      if (path === "/api/user") return Response.json({ id: "user", email: "user@example.com" })
+      if (path === "/api/orgs") {
+        return Response.json([
+          { id: "org-z", name: "Zebra" },
+          { id: "org-a", name: "Alpha" },
+        ])
+      }
+      if (path === "/api/v2/config") {
+        config.push({ authorization: request.headers.get("authorization"), orgID: request.headers.get("x-org-id") })
+        if (orgID === "org-missing") return new Response("Forbidden", { status: 403 })
+        return Response.json({ providers: {} })
+      }
+      return new Response("Not found", { status: 404 })
+    },
+  })
+  return { server, config, requests }
+}
+
 function required<T>(value: T | undefined): T {
   if (value === undefined) throw new Error("Expected value")
   return value
 }
 
-function eventually<A>(
-  effect: Effect.Effect<A>,
+function eventually<A, E>(
+  effect: Effect.Effect<A, E>,
   predicate: (value: A) => boolean,
   remaining = 1000,
-): Effect.Effect<A, Error> {
+): Effect.Effect<A, E | Error> {
   return Effect.gen(function* () {
     const value = yield* effect
     if (predicate(value)) return value
@@ -65,6 +113,9 @@ describe("OpencodePlugin", () => {
           id: Integration.MethodID.make("device"),
           type: "oauth",
           label: "OpenCode Console account",
+          form: [
+            { key: "server", type: "string", format: "uri", hidden: true, default: "https://opencode.ai/console" },
+          ],
         },
         { type: "key", label: "API key (service account)" },
       ])
@@ -161,6 +212,119 @@ describe("OpencodePlugin", () => {
     ),
   )
 
+  for (const orgID of ["org-z", undefined, null, "org-missing"]) {
+    it.live(`uses the device token organization during authorization: ${orgID}`, () =>
+      Effect.acquireUseRelease(
+        Effect.sync(() => consoleServer(orgID)),
+        ({ server, config }) =>
+          Effect.gen(function* () {
+            yield* addPlugin()
+            const integrations = yield* Integration.Service
+            const credentials = yield* Credential.Service
+            const integrationID = Integration.ID.make("opencode")
+            const attempt = yield* integrations.oauth.connect({
+              integrationID,
+              methodID: Integration.MethodID.make("device"),
+              answer: { server: server.url.origin },
+            })
+            const status = yield* eventually(
+              integrations.oauth.status({ integrationID, attemptID: attempt.attemptID }),
+              (status) => status.status !== "pending",
+            )
+            if (orgID === "org-missing") {
+              expect(status).toMatchObject({
+                status: "failed",
+                message: "OpenCode organization not found: org-missing",
+              })
+              expect(yield* credentials.list(integrationID)).toEqual([])
+              expect(config).toEqual([])
+              return
+            }
+            expect(status.status).toBe("complete")
+            expect((yield* credentials.list(integrationID))[0]).toMatchObject({
+              label: orgID === "org-z" ? "Zebra" : "Alpha",
+              value: {
+                type: "oauth",
+                access: "access",
+                refresh: "refresh",
+                metadata: {
+                  server: server.url.origin,
+                  accountID: "user",
+                  email: "user@example.com",
+                  orgID: orgID ?? "org-a",
+                  orgName: orgID === "org-z" ? "Zebra" : "Alpha",
+                },
+              },
+            })
+            yield* eventually(
+              Effect.sync(() => config.length),
+              (count) => count > 0,
+            )
+            expect(config).toEqual([{ authorization: "Bearer access", orgID: orgID ?? "org-a" }])
+          }),
+        ({ server }) => Effect.promise(() => server.stop(true)),
+      ),
+    )
+  }
+
+  for (const scenario of [
+    { orgID: "org-z" },
+    { orgID: undefined },
+    { orgID: null },
+    { orgID: "org-missing" },
+    { orgID: "org-z", unavailable: true },
+    { orgID: "org-a", unavailable: true },
+  ]) {
+    it.live(
+      `persists rotated credentials for ${scenario.orgID}${scenario.unavailable ? " with discovery unavailable" : ""}`,
+      () =>
+        Effect.acquireUseRelease(
+          Effect.sync(() => consoleServer(scenario.orgID, scenario.unavailable)),
+          ({ server, config, requests }) =>
+            Effect.gen(function* () {
+              const credentials = yield* Credential.Service
+              const initial = yield* credentials.create({
+                integrationID: Integration.ID.make("opencode"),
+                label: "Custom label",
+                value: Credential.OAuth.make({
+                  type: "oauth",
+                  methodID: Integration.MethodID.make("device"),
+                  access: "expired-access",
+                  refresh: "old-refresh",
+                  expires: 0,
+                  metadata: { server: server.url.origin, orgID: "org-a", orgName: "Alpha", custom: "preserved" },
+                }),
+              })
+              yield* addPlugin()
+              const stored = required(yield* credentials.get(initial.id))
+              expect(stored).toMatchObject({
+                label: "Custom label",
+                value: {
+                  access: "access",
+                  refresh: "refresh",
+                  metadata: {
+                    server: server.url.origin,
+                    orgID: scenario.orgID ?? "org-a",
+                    orgName: scenario.orgID === "org-a" ? "Alpha" : (scenario.orgID ?? "Alpha"),
+                    custom: "preserved",
+                  },
+                },
+              })
+              if (stored.value.type !== "oauth") throw new Error("Expected OAuth credential")
+              expect(stored.value.expires).toBeGreaterThan(Date.now())
+              if (scenario.orgID == null) expect(stored.value.metadata).toEqual(initial.value.metadata)
+              expect(config).toEqual([{ authorization: "Bearer access", orgID: scenario.orgID ?? "org-a" }])
+              const integrations = yield* Integration.Service
+              expect(
+                yield* integrations.connection.resolve({ type: "credential", id: initial.id, label: initial.label }),
+              ).toEqual(stored.value)
+              expect(requests).toEqual(["/auth/device/token", "/api/v2/config"])
+            }),
+          ({ server }) => Effect.promise(() => server.stop(true)),
+        ),
+    )
+  }
+
   it.effect("rejects non-HTTP OpenCode servers", () =>
     Effect.gen(function* () {
       yield* addPlugin()
@@ -189,7 +353,7 @@ describe("OpencodePlugin", () => {
         })
         .pipe(Effect.flip)
       expect(error).toBeInstanceOf(Integration.AuthorizationError)
-      expect(String(error.cause)).toContain("Invalid OpenCode server URL: expected string")
+      expect(String(error.cause)).toContain("Expected string for form field: server")
     }),
   )
 
@@ -266,15 +430,16 @@ describe("OpencodePlugin", () => {
       ({ authorization, requests, server }) =>
         Effect.gen(function* () {
           const credentials = yield* Credential.Service
-          const catalog = yield* Catalog.Service
+          const providers = yield* Provider.Service
+          const models = yield* Model.Service
           const integrations = yield* Integration.Service
-          yield* catalog.transform((editor) => {
-            editor.provider.update(Provider.ID.openai, (provider) => {
-              provider.package = Provider.aisdk("@ai-sdk/openai")
+          yield* providers.transform((editor) => {
+            editor.update(Provider.ID.openai, (provider) => {
+              provider.package = "@opencode/ai/providers/openai"
               provider.integrationID = Integration.ID.make("openai")
             })
-            editor.model.update(Provider.ID.openai, Model.ID.make("api-model"), (model) => {
-              model.package = Provider.aisdk("@ai-sdk/openai")
+            editor.models.update(Provider.ID.openai, Model.ID.make("api-model"), (model) => {
+              model.package = "@opencode/ai/providers/openai"
               model.settings = { baseURL: "https://upstream.example/v1" }
               model.variants = [
                 {
@@ -285,7 +450,7 @@ describe("OpencodePlugin", () => {
                 },
               ]
             })
-            editor.model.update(Provider.ID.make("remote"), Model.ID.make("stale"), () => {})
+            editor.models.update(Provider.ID.make("remote"), Model.ID.make("stale"), () => {})
           })
           const initial = yield* credentials.create({
             integrationID: Integration.ID.make("opencode"),
@@ -300,19 +465,19 @@ describe("OpencodePlugin", () => {
           expect(authorization).toEqual(["Bearer secret"])
           expect(requests).toEqual(["GET /api/v2/config"])
 
-          const provider = required(yield* catalog.provider.get(Provider.ID.make("remote")))
+          const provider = required(yield* providers.get(Provider.ID.make("remote")))
           expect(provider).toMatchObject({
             id: "remote",
             canonical: "openai",
             name: "Remote",
             integrationID: "opencode",
-            package: Provider.aisdk("@ai-sdk/openai-compatible"),
+            package: "@opencode/ai/providers/openai-compatible",
             settings: { baseURL: `${server.url.origin}/v1`, custom: "value" },
             headers: { "x-org-id": "org" },
           })
           expect(yield* integrations.get(Integration.ID.make("remote"))).toBeUndefined()
 
-          const model = required(yield* catalog.model.get(Provider.ID.make("remote"), Model.ID.make("model")))
+          const model = required(yield* models.get(Provider.ID.make("remote"), Model.ID.make("model")))
           expect(model).toMatchObject({
             id: "model",
             modelID: "api-model",
@@ -323,13 +488,18 @@ describe("OpencodePlugin", () => {
             capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
             cost: [{ input: 1, output: 2, cache: { read: 0.1, write: 0 } }],
             limit: { context: 1000, output: 100 },
-            package: Provider.aisdk("@ai-sdk/openai-compatible"),
+            package: "@opencode/ai/providers/openai-compatible",
             settings: { baseURL: `${server.url.origin}/v1`, custom: "value", temperature: 0.5 },
             headers: { "x-org-id": "org" },
           })
-          expect(model.settings).toEqual({ baseURL: `${server.url.origin}/v1`, custom: "value", temperature: 0.5 })
-          const override = required(yield* catalog.model.get(Provider.ID.make("remote"), Model.ID.make("override")))
-          expect(override.package).toBe(Provider.aisdk("@ai-sdk/anthropic"))
+          expect(model.settings).toEqual({
+            baseURL: `${server.url.origin}/v1`,
+            custom: "value",
+            temperature: 0.5,
+            provider: "openai",
+          })
+          const override = required(yield* models.get(Provider.ID.make("remote"), Model.ID.make("override")))
+          expect(override.package).toBe("@opencode/ai/providers/anthropic")
           expect(override.settings?.baseURL).toBe(`${server.url.origin}/anthropic`)
           expect(model.variants).toEqual([
             {
@@ -344,13 +514,13 @@ describe("OpencodePlugin", () => {
               headers: { "x-variant": "high" },
             },
           ])
+          expect(required(yield* models.get(Provider.ID.make("remote"), Model.ID.make("disabled"))).enabled).toBe(false)
+          expect(yield* models.get(Provider.ID.make("remote"), Model.ID.make("stale"))).toBeDefined()
           expect(
-            required(yield* catalog.model.get(Provider.ID.make("remote"), Model.ID.make("disabled"))).enabled,
-          ).toBe(false)
-          expect(yield* catalog.model.get(Provider.ID.make("remote"), Model.ID.make("stale"))).toBeDefined()
-          expect((yield* catalog.model.get(Provider.ID.openai, Model.ID.make("api-model")))?.settings?.baseURL).toBe(
-            "https://upstream.example/v1",
-          )
+            (yield* providers.snapshot()).records.get(Provider.ID.openai)?.models.get(Model.ID.make("api-model"))
+              ?.settings?.baseURL,
+          ).toBe("https://upstream.example/v1")
+          expect(yield* models.get(Provider.ID.openai, Model.ID.make("api-model"))).toBeUndefined()
 
           yield* credentials.update(initial.id, { label: "Renamed" })
           yield* Effect.yieldNow
@@ -375,6 +545,409 @@ describe("OpencodePlugin", () => {
           yield* Effect.yieldNow
           expect(authorization).toEqual(["Bearer secret", "Bearer replacement"])
           expect((yield* credentials.list(Integration.ID.make("opencode"))).at(-1)?.id).toBe(replacement.id)
+        }),
+      ({ server }) => Effect.promise(() => server.stop(true)),
+    ),
+  )
+
+  it.effect("refreshes hosted search with Console config and skips unchanged snapshots", () =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => {
+        const state = { advertised: false, requests: 0 }
+        const server = Bun.serve({
+          port: 0,
+          fetch: () => {
+            state.requests++
+            return Response.json({
+              providers: {},
+              ...(state.advertised ? { websearch: { providerID: "opencode" } } : {}),
+            })
+          },
+        })
+        return { server, state }
+      }),
+      ({ server, state }) =>
+        Effect.gen(function* () {
+          const credentials = yield* Credential.Service
+          const providers = yield* Provider.Service
+          const websearch = yield* WebSearch.Service
+          const rebuilds = { provider: 0, websearch: 0 }
+          yield* credentials.create({
+            integrationID: Integration.ID.make("opencode"),
+            value: Credential.Key.make({ type: "key", key: "secret", metadata: { server: server.url.origin } }),
+          })
+          yield* providers.transform(() => {
+            rebuilds.provider++
+          })
+          yield* websearch.transform(() => {
+            rebuilds.websearch++
+          })
+          yield* addPlugin()
+          yield* drain
+          const initial = { ...rebuilds }
+          expect(state.requests).toBe(1)
+          expect(yield* websearch.default()).toBeUndefined()
+
+          state.advertised = true
+          yield* TestClock.adjust("50 seconds")
+          yield* drain
+          expect(state.requests).toBe(1)
+          expect(rebuilds).toEqual(initial)
+          expect(yield* websearch.default()).toBeUndefined()
+
+          yield* TestClock.adjust("10 seconds")
+          yield* drain
+          expect(state.requests).toBe(2)
+          expect(rebuilds).toEqual({ provider: initial.provider + 1, websearch: initial.websearch + 1 })
+          expect(yield* websearch.default()).toEqual({ id: WebSearch.ID.make("opencode"), name: "OpenCode Web Search" })
+
+          yield* TestClock.adjust("1 minute")
+          yield* drain
+          expect(state.requests).toBe(3)
+          expect(rebuilds).toEqual({ provider: initial.provider + 1, websearch: initial.websearch + 1 })
+          expect(yield* websearch.default()).toEqual({ id: WebSearch.ID.make("opencode"), name: "OpenCode Web Search" })
+
+          state.advertised = false
+          yield* TestClock.adjust("1 minute")
+          yield* drain
+          expect(state.requests).toBe(4)
+          expect(rebuilds).toEqual({ provider: initial.provider + 2, websearch: initial.websearch + 2 })
+          expect(yield* websearch.providers()).toEqual([])
+          expect(yield* websearch.default()).toBeUndefined()
+        }),
+      ({ server }) => Effect.promise(() => server.stop(true)),
+    ),
+  )
+
+  it.live("loads and executes hosted web search from the connected OpenCode server", () =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => {
+        const requests: Array<{
+          method: string
+          path: string
+          authorization: string | null
+          orgID: string | null
+          body?: unknown
+        }> = []
+        const gate = Promise.withResolvers<void>()
+        const state = { advertised: true, providerID: "opencode", waitForConfig: false }
+        const server = Bun.serve({
+          port: 0,
+          fetch: async (request) => {
+            const path = new URL(request.url).pathname
+            const body = request.method === "POST" ? await request.json() : undefined
+            requests.push({
+              method: request.method,
+              path,
+              authorization: request.headers.get("authorization"),
+              orgID: request.headers.get("x-org-id"),
+              ...(body === undefined ? {} : { body }),
+            })
+            if (path === "/api/v2/config") {
+              if (state.waitForConfig) await gate.promise
+              return Response.json({
+                providers: {},
+                ...(state.advertised
+                  ? {
+                      websearch: {
+                        providerID: "opencode",
+                      },
+                    }
+                  : {}),
+              })
+            }
+            if (path === "/api/websearch" || path === "/other/api/websearch") {
+              return Response.json({
+                providerID: state.providerID,
+                results: [
+                  {
+                    url: "https://github.com/anomalyco/opencode",
+                    title: "OpenCode",
+                    content: "Open source AI coding agent.",
+                    time: { published: 1_700_000_000_000 },
+                  },
+                ],
+              })
+            }
+            return new Response("Not found", { status: 404 })
+          },
+        })
+        return { gate, requests, server, state }
+      }),
+      ({ gate, requests, server, state }) =>
+        Effect.gen(function* () {
+          const credentials = yield* Credential.Service
+          const websearch = yield* WebSearch.Service
+          const account = (access: string, serverURL = server.url.origin, orgID = "org_test") =>
+            Credential.OAuth.make({
+              type: "oauth",
+              methodID: Integration.MethodID.make("device"),
+              access,
+              refresh: "refresh",
+              expires: Date.now() + 600_000,
+              metadata: { server: serverURL, orgID },
+            })
+          const initial = yield* credentials.create({
+            integrationID: Integration.ID.make("opencode"),
+            value: account("secret"),
+          })
+
+          yield* addPlugin()
+          expect(yield* websearch.providers()).toContainEqual({
+            id: WebSearch.ID.make("opencode"),
+            name: "OpenCode Web Search",
+          })
+          expect(yield* websearch.default()).toEqual({ id: WebSearch.ID.make("opencode"), name: "OpenCode Web Search" })
+          expect(yield* websearch.query({ query: "effect web search" })).toEqual(
+            new WebSearch.Response({
+              providerID: WebSearch.ID.make("opencode"),
+              results: [
+                {
+                  url: "https://github.com/anomalyco/opencode",
+                  title: "OpenCode",
+                  content: "Open source AI coding agent.",
+                  time: { published: 1_700_000_000_000 },
+                },
+              ],
+            }),
+          )
+          expect(requests).toEqual([
+            {
+              method: "GET",
+              path: "/api/v2/config",
+              authorization: "Bearer secret",
+              orgID: "org_test",
+            },
+            {
+              method: "POST",
+              path: "/api/websearch",
+              authorization: "Bearer secret",
+              orgID: "org_test",
+              body: { query: "effect web search", providerID: "opencode" },
+            },
+          ])
+
+          yield* credentials.update(initial.id, {
+            value: account("replacement"),
+          })
+          yield* websearch.query({ query: "fresh credential" })
+          expect(requests.at(-1)).toMatchObject({
+            method: "POST",
+            authorization: "Bearer replacement",
+            body: { query: "fresh credential", providerID: "opencode" },
+          })
+
+          yield* credentials.update(initial.id, {
+            value: account("moved", `${server.url.origin}/other///?ignored=true#ignored`),
+          })
+          yield* websearch.query({ query: "updated server" })
+          expect(requests.at(-1)).toMatchObject({
+            method: "POST",
+            path: "/other/api/websearch",
+            authorization: "Bearer moved",
+            orgID: "org_test",
+            body: { query: "updated server", providerID: "opencode" },
+          })
+          yield* credentials.update(initial.id, {
+            value: account("replacement"),
+          })
+
+          state.providerID = "unexpected"
+          expect((yield* websearch.query({ query: "wrong provider" }).pipe(Effect.flip))._tag).toBe("WebSearch.Request")
+
+          state.advertised = false
+          state.waitForConfig = true
+          const searchCount = requests.filter((request) => request.path === "/api/websearch").length
+          yield* credentials.create({
+            integrationID: Integration.ID.make("opencode"),
+            value: account("switched", server.url.origin, "org_switched"),
+          })
+          yield* eventually(
+            Effect.sync(() => requests),
+            (requests) => requests.some((request) => request.authorization === "Bearer switched"),
+          )
+          expect((yield* websearch.query({ query: "switch race" }).pipe(Effect.flip))._tag).toBe("WebSearch.Request")
+          expect(requests.filter((request) => request.path === "/api/websearch")).toHaveLength(searchCount)
+          gate.resolve()
+          yield* eventually(websearch.providers(), (providers) =>
+            providers.every((provider) => provider.id !== WebSearch.ID.make("opencode")),
+          )
+          expect(yield* websearch.default()).toBeUndefined()
+          expect(requests.at(-1)).toMatchObject({
+            method: "GET",
+            path: "/api/v2/config",
+            authorization: "Bearer switched",
+            orgID: "org_switched",
+          })
+        }),
+      ({ gate, server }) =>
+        Effect.sync(() => gate.resolve()).pipe(Effect.andThen(Effect.promise(() => server.stop(true)))),
+    ),
+  )
+
+  it.live("derives hosted search identity and the default Console endpoint locally", () =>
+    Effect.acquireUseRelease(
+      Effect.sync(() =>
+        Bun.serve({
+          port: 0,
+          fetch: (request) => {
+            if (new URL(request.url).pathname === "/console/api/v2/config") {
+              return Response.json({
+                providers: {},
+                websearch: {
+                  providerID: "managed-search",
+                  name: "Remote name",
+                  url: "https://example.invalid/search",
+                },
+              })
+            }
+            return Response.json({ providerID: "managed-search", results: [] })
+          },
+        }),
+      ),
+      (server) =>
+        Effect.gen(function* () {
+          const credentials = yield* Credential.Service
+          const websearch = yield* WebSearch.Service
+          const http = yield* HttpClient.HttpClient
+          const requests: string[] = []
+          yield* credentials.create({
+            integrationID: Integration.ID.make("opencode"),
+            value: Credential.Key.make({ type: "key", key: "secret" }),
+          })
+          yield* addPlugin().pipe(
+            Effect.provideService(
+              HttpClient.HttpClient,
+              http.pipe(
+                HttpClient.mapRequest((request) => {
+                  requests.push(request.url)
+                  return HttpClientRequest.setUrl(request, `${server.url.origin}${new URL(request.url).pathname}`)
+                }),
+              ),
+            ),
+          )
+
+          expect(yield* websearch.default()).toEqual({
+            id: WebSearch.ID.make("managed-search"),
+            name: "OpenCode Web Search",
+          })
+          expect(yield* websearch.query({ query: "default Console" })).toEqual(
+            new WebSearch.Response({ providerID: WebSearch.ID.make("managed-search"), results: [] }),
+          )
+          expect(requests).toEqual([
+            "https://opencode.ai/console/api/v2/config",
+            "https://opencode.ai/console/api/websearch",
+          ])
+        }),
+      (server) => Effect.promise(() => server.stop(true)),
+    ),
+  )
+
+  it.live("does not forward hosted search credentials through redirects", () =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => {
+        const requests: string[] = []
+        const state = { crossOrigin: false }
+        const server = Bun.serve({
+          port: 0,
+          fetch: (request) => {
+            const url = new URL(request.url)
+            requests.push(url.pathname)
+            if (url.pathname === "/console/api/v2/config") {
+              return Response.json({
+                providers: {},
+                websearch: {
+                  providerID: "opencode",
+                },
+              })
+            }
+            if (url.pathname === "/console/api/websearch") {
+              if (state.crossOrigin) url.hostname = "127.0.0.1"
+              return Response.redirect(`${url.origin}/outside-console`, 307)
+            }
+            return Response.json({ providerID: "opencode", results: [] })
+          },
+        })
+        return { requests, server, state }
+      }),
+      ({ requests, server, state }) =>
+        Effect.gen(function* () {
+          const credentials = yield* Credential.Service
+          const websearch = yield* WebSearch.Service
+          yield* credentials.create({
+            integrationID: Integration.ID.make("opencode"),
+            value: Credential.Key.make({
+              type: "key",
+              key: "secret",
+              metadata: { server: `${server.url.origin}/console`, orgID: "org_test" },
+            }),
+          })
+          yield* addPlugin()
+
+          expect((yield* websearch.query({ query: "private search" }).pipe(Effect.flip))._tag).toBe("WebSearch.Request")
+          expect(requests).toEqual(["/console/api/v2/config", "/console/api/websearch"])
+
+          state.crossOrigin = true
+          expect((yield* websearch.query({ query: "private search" }).pipe(Effect.flip))._tag).toBe("WebSearch.Request")
+          expect(requests).toEqual(["/console/api/v2/config", "/console/api/websearch", "/console/api/websearch"])
+        }),
+      ({ server }) => Effect.promise(() => server.stop(true)),
+    ),
+  )
+
+  it.live("closes a rejected hosted search response without waiting for its body", () =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => {
+        const state = { cancelled: false }
+        const server = Bun.serve({
+          port: 0,
+          fetch: (request) => {
+            const url = new URL(request.url)
+            if (url.pathname === "/api/v2/config") {
+              return Response.json({
+                providers: {},
+                websearch: {
+                  providerID: "opencode",
+                },
+              })
+            }
+            return new Response(
+              new ReadableStream({
+                start(controller) {
+                  controller.enqueue(new TextEncoder().encode("temporarily unavailable"))
+                },
+                cancel() {
+                  state.cancelled = true
+                },
+              }),
+              { status: 503 },
+            )
+          },
+        })
+        return { server, state }
+      }),
+      ({ server, state }) =>
+        Effect.gen(function* () {
+          const credentials = yield* Credential.Service
+          const websearch = yield* WebSearch.Service
+          yield* credentials.create({
+            integrationID: Integration.ID.make("opencode"),
+            value: Credential.Key.make({
+              type: "key",
+              key: "secret",
+              metadata: { server: server.url.origin, orgID: "org_test" },
+            }),
+          })
+          yield* addPlugin()
+
+          const error = yield* websearch.query({ query: "rejected search" }).pipe(Effect.flip)
+          expect(error._tag).toBe("WebSearch.Request")
+          yield* eventually(
+            Effect.sync(() => state.cancelled),
+            (cancelled) => cancelled,
+          )
+          // Callers can retain errors, so response cleanup must not depend on garbage collection.
+          expect(error).toBeInstanceOf(WebSearch.RequestError)
         }),
       ({ server }) => Effect.promise(() => server.stop(true)),
     ),
@@ -450,7 +1023,7 @@ describe("OpencodePlugin", () => {
       ({ variants, requests, server }) =>
         Effect.gen(function* () {
           const credentials = yield* Credential.Service
-          const catalog = yield* Catalog.Service
+          const models = yield* Model.Service
           const credential = Credential.Key.make({
             type: "key",
             key: "secret",
@@ -458,7 +1031,7 @@ describe("OpencodePlugin", () => {
           })
           yield* credentials.create({ integrationID: Integration.ID.make("opencode"), value: credential })
           yield* addPlugin()
-          const model = required(yield* catalog.model.get(Provider.ID.make("remote"), Model.ID.make("astra")))
+          const model = required(yield* models.get(Provider.ID.make("remote"), Model.ID.make("astra")))
           expect(model.canonical).toBe(Provider.ID.openai)
           yield* Effect.forEach(variants, (variant, index) =>
             Effect.gen(function* () {
@@ -488,8 +1061,8 @@ describe("OpencodePlugin", () => {
               if (variant.id === "plain") expect(request.body).not.toHaveProperty("reasoning")
             }),
           )
-          const compatible = required(yield* catalog.model.get(Provider.ID.make("compatible"), Model.ID.make("astra")))
-          const override = required(yield* catalog.model.get(Provider.ID.make("remote"), Model.ID.make("override")))
+          const compatible = required(yield* models.get(Provider.ID.make("compatible"), Model.ID.make("astra")))
+          const override = required(yield* models.get(Provider.ID.make("remote"), Model.ID.make("override")))
           for (const model of [compatible, override]) {
             expect(model.variants.find((variant) => variant.id === "native")?.body).toEqual({
               reasoning: { effort: "high", summary: "auto" },
@@ -505,16 +1078,17 @@ describe("OpencodePlugin", () => {
   it.effect("uses a public key and disables paid models without credentials", () =>
     withEnv({ OPENCODE_API_KEY: undefined }, () =>
       Effect.gen(function* () {
-        const catalog = yield* Catalog.Service
+        const catalog = yield* Provider.Service
+        const models = yield* Model.Service
         yield* catalog.transform((catalog) => {
-          catalog.provider.update(Provider.ID.opencode, () => {})
-          catalog.model.update(Provider.ID.opencode, Model.ID.make("paid"), (draft) => {
+          catalog.update(Provider.ID.opencode, () => {})
+          catalog.models.update(Provider.ID.opencode, Model.ID.make("paid"), (draft) => {
             draft.cost = cost(1)
           })
         })
         yield* addPlugin()
-        expect(required(yield* catalog.provider.get(Provider.ID.opencode)).settings?.apiKey).toBe("public")
-        expect(required(yield* catalog.model.get(Provider.ID.opencode, Model.ID.make("paid"))).enabled).toBe(false)
+        expect(required(yield* catalog.get(Provider.ID.opencode)).settings?.apiKey).toBe("public")
+        expect(required(yield* models.get(Provider.ID.opencode, Model.ID.make("paid"))).enabled).toBe(false)
       }),
     ),
   )
@@ -522,18 +1096,19 @@ describe("OpencodePlugin", () => {
   it.effect("keeps free models without credentials", () =>
     withEnv({ OPENCODE_API_KEY: undefined }, () =>
       Effect.gen(function* () {
-        const catalog = yield* Catalog.Service
+        const catalog = yield* Provider.Service
+        const models = yield* Model.Service
         yield* catalog.transform((catalog) => {
-          catalog.provider.update(Provider.ID.opencode, () => {})
-          catalog.model.update(Provider.ID.opencode, Model.ID.make("free"), (draft) => {
+          catalog.update(Provider.ID.opencode, () => {})
+          catalog.models.update(Provider.ID.opencode, Model.ID.make("free"), (draft) => {
             draft.cost = cost(0)
           })
         })
         yield* addPlugin()
-        expect(required(yield* catalog.provider.get(Provider.ID.opencode)).settings?.apiKey).toBe("public")
-        expect(required(yield* catalog.provider.get(Provider.ID.opencode)).activation).toBe("enabled")
-        expect((yield* catalog.provider.available()).map((provider) => provider.id)).toContain(Provider.ID.opencode)
-        expect(required(yield* catalog.model.get(Provider.ID.opencode, Model.ID.make("free"))).enabled).toBe(true)
+        expect(required(yield* catalog.get(Provider.ID.opencode)).settings?.apiKey).toBe("public")
+        expect(required(yield* catalog.get(Provider.ID.opencode)).activation).toBe("enabled")
+        expect((yield* catalog.available()).map((provider) => provider.id)).toContain(Provider.ID.opencode)
+        expect(required(yield* models.get(Provider.ID.opencode, Model.ID.make("free"))).enabled).toBe(true)
       }),
     ),
   )
@@ -541,18 +1116,17 @@ describe("OpencodePlugin", () => {
   it.effect("treats output-only cost as free without credentials", () =>
     withEnv({ OPENCODE_API_KEY: undefined }, () =>
       Effect.gen(function* () {
-        const catalog = yield* Catalog.Service
+        const catalog = yield* Provider.Service
+        const models = yield* Model.Service
         yield* catalog.transform((catalog) => {
-          catalog.provider.update(Provider.ID.opencode, () => {})
-          catalog.model.update(Provider.ID.opencode, Model.ID.make("output-only"), (draft) => {
+          catalog.update(Provider.ID.opencode, () => {})
+          catalog.models.update(Provider.ID.opencode, Model.ID.make("output-only"), (draft) => {
             draft.cost = cost(0, 1)
           })
         })
         yield* addPlugin()
-        expect(required(yield* catalog.provider.get(Provider.ID.opencode)).settings?.apiKey).toBe("public")
-        expect(required(yield* catalog.model.get(Provider.ID.opencode, Model.ID.make("output-only"))).enabled).toBe(
-          true,
-        )
+        expect(required(yield* catalog.get(Provider.ID.opencode)).settings?.apiKey).toBe("public")
+        expect(required(yield* models.get(Provider.ID.opencode, Model.ID.make("output-only"))).enabled).toBe(true)
       }),
     ),
   )
@@ -560,16 +1134,24 @@ describe("OpencodePlugin", () => {
   it.effect("uses OPENCODE_API_KEY as credentials", () =>
     withEnv({ OPENCODE_API_KEY: "secret" }, () =>
       Effect.gen(function* () {
-        const catalog = yield* Catalog.Service
+        const catalog = yield* Provider.Service
+        const models = yield* Model.Service
+        const integrations = yield* Integration.Service
+        yield* integrations.transform((editor) =>
+          editor.method.update({
+            integrationID: Integration.ID.make("opencode"),
+            method: { type: "env", names: ["OPENCODE_API_KEY"] },
+          }),
+        )
         yield* catalog.transform((catalog) => {
-          catalog.provider.update(Provider.ID.opencode, () => {})
-          catalog.model.update(Provider.ID.opencode, Model.ID.make("paid"), (draft) => {
+          catalog.update(Provider.ID.opencode, () => {})
+          catalog.models.update(Provider.ID.opencode, Model.ID.make("paid"), (draft) => {
             draft.cost = cost(1)
           })
         })
-        yield* addPlugin()
-        expect(required(yield* catalog.provider.get(Provider.ID.opencode)).settings?.apiKey).toBeUndefined()
-        expect(required(yield* catalog.model.get(Provider.ID.opencode, Model.ID.make("paid"))).enabled).toBe(true)
+        yield* addPlugin().pipe(Effect.provideService(HttpClient.HttpClient, noRemoteConfig))
+        expect(required(yield* catalog.get(Provider.ID.opencode)).settings?.apiKey).toBeUndefined()
+        expect(required(yield* models.get(Provider.ID.opencode, Model.ID.make("paid"))).enabled).toBe(true)
       }),
     ),
   )
@@ -577,7 +1159,8 @@ describe("OpencodePlugin", () => {
   it.effect("uses configured provider env vars as credentials", () =>
     withEnv({ OPENCODE_API_KEY: undefined, CUSTOM_OPENCODE_API_KEY: "secret" }, () =>
       Effect.gen(function* () {
-        const catalog = yield* Catalog.Service
+        const catalog = yield* Provider.Service
+        const models = yield* Model.Service
         const integrations = yield* Integration.Service
         yield* integrations.transform((editor) => {
           editor.method.update({
@@ -586,23 +1169,16 @@ describe("OpencodePlugin", () => {
           })
         })
         yield* catalog.transform((catalog) => {
-          catalog.provider.update(Provider.ID.opencode, () => {})
-          catalog.model.update(Provider.ID.opencode, Model.ID.make("paid"), (draft) => {
+          catalog.update(Provider.ID.opencode, () => {})
+          catalog.models.update(Provider.ID.opencode, Model.ID.make("paid"), (draft) => {
             draft.cost = cost(1)
           })
         })
         // An env credential has no server metadata, so the plugin would ask the
         // default Console for remote config; answer 404 (no remote config) locally.
-        yield* addPlugin().pipe(
-          Effect.provideService(
-            HttpClient.HttpClient,
-            HttpClient.make((request) =>
-              Effect.succeed(HttpClientResponse.fromWeb(request, new Response(null, { status: 404 }))),
-            ),
-          ),
-        )
-        expect(required(yield* catalog.provider.get(Provider.ID.opencode)).settings?.apiKey).toBeUndefined()
-        expect(required(yield* catalog.model.get(Provider.ID.opencode, Model.ID.make("paid"))).enabled).toBe(true)
+        yield* addPlugin().pipe(Effect.provideService(HttpClient.HttpClient, noRemoteConfig))
+        expect(required(yield* catalog.get(Provider.ID.opencode)).settings?.apiKey).toBeUndefined()
+        expect(required(yield* models.get(Provider.ID.opencode, Model.ID.make("paid"))).enabled).toBe(true)
       }),
     ),
   )
@@ -610,19 +1186,21 @@ describe("OpencodePlugin", () => {
   it.effect("uses configured apiKey as credentials", () =>
     withEnv({ OPENCODE_API_KEY: undefined }, () =>
       Effect.gen(function* () {
-        const catalog = yield* Catalog.Service
+        const catalog = yield* Provider.Service
+        const models = yield* Model.Service
         yield* catalog.transform((catalog) => {
-          catalog.provider.update(Provider.ID.opencode, (draft) => {
+          catalog.update(Provider.ID.opencode, (draft) => {
             draft.package = Provider.aisdk("test-provider")
             draft.settings = { apiKey: "configured" }
+            draft.activation = "enabled"
           })
-          catalog.model.update(Provider.ID.opencode, Model.ID.make("paid"), (draft) => {
+          catalog.models.update(Provider.ID.opencode, Model.ID.make("paid"), (draft) => {
             draft.cost = cost(1)
           })
         })
         yield* addPlugin()
-        expect(required(yield* catalog.provider.get(Provider.ID.opencode)).settings?.apiKey).toBe("configured")
-        expect(required(yield* catalog.model.get(Provider.ID.opencode, Model.ID.make("paid"))).enabled).toBe(true)
+        expect(required(yield* catalog.get(Provider.ID.opencode)).settings?.apiKey).toBe("configured")
+        expect(required(yield* models.get(Provider.ID.opencode, Model.ID.make("paid"))).enabled).toBe(true)
       }),
     ),
   )
@@ -630,16 +1208,17 @@ describe("OpencodePlugin", () => {
   it.effect("ignores non-opencode providers and models", () =>
     withEnv({ OPENCODE_API_KEY: undefined }, () =>
       Effect.gen(function* () {
-        const catalog = yield* Catalog.Service
+        const catalog = yield* Provider.Service
+        const models = yield* Model.Service
         yield* catalog.transform((catalog) => {
-          catalog.provider.update(Provider.ID.openai, () => {})
-          catalog.model.update(Provider.ID.openai, Model.ID.make("paid"), (draft) => {
+          catalog.update(Provider.ID.openai, () => {})
+          catalog.models.update(Provider.ID.openai, Model.ID.make("paid"), (draft) => {
             draft.cost = cost(1)
           })
         })
         yield* addPlugin()
-        expect(required(yield* catalog.provider.get(Provider.ID.openai)).settings?.apiKey).toBeUndefined()
-        expect(required(yield* catalog.model.get(Provider.ID.openai, Model.ID.make("paid"))).enabled).toBe(true)
+        expect(required(yield* catalog.get(Provider.ID.openai)).settings?.apiKey).toBeUndefined()
+        expect(required(yield* models.get(Provider.ID.openai, Model.ID.make("paid"))).enabled).toBe(true)
       }),
     ),
   )

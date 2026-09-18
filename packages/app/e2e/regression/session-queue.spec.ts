@@ -12,7 +12,7 @@ const server = `http://${process.env.PLAYWRIGHT_SERVER_HOST ?? "127.0.0.1"}:${pr
 type InboxRow = {
   id: string
   sessionID: string
-  timeCreated: number
+  time: { created: number }
   type: "user"
   payload: { text: string; metadata?: Record<string, unknown> }
   delivery: "steer" | "queue"
@@ -22,7 +22,7 @@ function createQueueMock(seed: string[], messages: SessionMessageInfo[] = []) {
   const rows: InboxRow[] = seed.map((text, index) => ({
     id: `inb_seed_${index + 1}`,
     sessionID,
-    timeCreated: 1700000000000 + index,
+    time: { created: 1700000000000 + index },
     type: "user",
     payload: { text },
     delivery: "queue",
@@ -59,7 +59,7 @@ function createQueueMock(seed: string[], messages: SessionMessageInfo[] = []) {
       const row: InboxRow = {
         id: typeof input.body.id === "string" ? input.body.id : `inb_mock_${sequence}`,
         sessionID: input.sessionID,
-        timeCreated: Date.now(),
+        time: { created: Date.now() },
         type: "user",
         payload: {
           text: typeof input.body.text === "string" ? input.body.text : "",
@@ -74,7 +74,7 @@ function createQueueMock(seed: string[], messages: SessionMessageInfo[] = []) {
         item: { type: "user", payload: row.payload, delivery: row.delivery },
       })
     },
-    onInboxChange: (input: { sessionID: string; inboxID: string; action: "cancel" | "steer" }) => {
+    onInboxChange: (input: { sessionID: string; inboxID: string; action: "cancel" | "steer" | "queue" }) => {
       changes.push({ inboxID: input.inboxID, action: input.action })
       log.push(`${input.action}:${input.inboxID}`)
       const index = rows.findIndex((row) => row.id === input.inboxID)
@@ -85,11 +85,11 @@ function createQueueMock(seed: string[], messages: SessionMessageInfo[] = []) {
         emit("session.inbox.cancelled", { sessionID: input.sessionID, inboxID: input.inboxID })
         return
       }
-      row.delivery = "steer"
+      row.delivery = input.action
       emit("session.inbox.delivery.changed", {
         sessionID: input.sessionID,
         inboxID: input.inboxID,
-        delivery: "steer",
+        delivery: input.action,
       })
     },
   }
@@ -308,8 +308,8 @@ for (const delivery of ["steer", "queue"] as const) {
     })
     const tools = page.locator('[data-timeline-part-ids="tool_queue_read,tool_queue_grep"]')
     await expect(tools).toBeVisible()
-    await expect(tools).toHaveText(/^Used\s*1 Read, 1 Grep$/)
-    await expect(tools.locator('[data-slot="basic-tool-tool-title"]')).toHaveText("1 Read, 1 Grep")
+    await expect(tools).toHaveText(/^Used\s*2\s*Read, Grep$/)
+    await expect(tools.locator('[data-slot="basic-tool-tool-title"]')).toHaveText("Read, Grep")
     await expect(thinking).toHaveCount(0)
     await expect(pending).toBeVisible()
     expect(mock.rows.map((row) => ({ id: row.id, delivery: row.delivery }))).toEqual([
@@ -318,7 +318,7 @@ for (const delivery of ["steer", "queue"] as const) {
     await transcript.screenshot({ path: testInfo.outputPath("pending-steer.png") })
 
     // Soft assertions let delivery run too, even when the pending ordering regresses.
-    await expect.soft(tools.or(pending)).toHaveText([/^Used\s*1 Read, 1 Grep$/, /U2: Also check the retry path\./])
+    await expect.soft(tools.or(pending)).toHaveText([/^Used\s*2\s*Read, Grep$/, /U2: Also check the retry path\./])
     await expect
       .soft(transcript.locator('[data-timeline-row="AssistantPart"]').filter({ has: tools }))
       .toHaveAttribute("data-message-id", userID)
@@ -350,7 +350,7 @@ for (const delivery of ["steer", "queue"] as const) {
     await expect(response).toHaveAttribute("data-message-id", inboxID)
     await expect(thinking).toHaveCount(0)
     await expect(tools.or(pending).or(response)).toHaveText([
-      /^Used\s*1 Read, 1 Grep$/,
+      /^Used\s*2\s*Read, Grep$/,
       /U2: Also check the retry path\./,
       /A3: Now checking the retry path for U2\./,
     ])

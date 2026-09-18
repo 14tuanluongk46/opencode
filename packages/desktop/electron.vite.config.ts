@@ -45,6 +45,9 @@ export default defineConfig(({ command }) => ({
         // corrupt bundled TypeScript, while an output banner places the shim safely.
         output: {
           format: "es",
+          // DesktopPaths resolves resources from the main output directory,
+          // including when the lazy desktop entry shares it with other chunks.
+          chunkFileNames: "[name]-[hash].js",
           banner: `
 // -- CommonJS Shims --
 import __cjs_mod__ from 'node:module';
@@ -93,6 +96,9 @@ const require = __cjs_mod__.createRequire(import.meta.url);
     define: {
       "import.meta.env.OPENCODE_VERSION": JSON.stringify(process.env.OPENCODE_VERSION),
       "import.meta.env.VITE_OPENCODE_CHANNEL": JSON.stringify(channel),
+      "import.meta.env.OPENCODE_TEST_ONBOARDING": JSON.stringify(
+        command === "serve" && process.env.OPENCODE_TEST_ONBOARDING === "1",
+      ),
     },
     plugins: [pickerPlugin(), appPlugin, sentry],
     publicDir: "../../../app/public",
