@@ -6,7 +6,7 @@ import { useSDK } from "../context/sdk"
 import { useEvent } from "../context/event"
 import { useProject } from "../context/project"
 import { useRenderer } from "@opentui/solid"
-import { createEffect, createMemo, createResource, createSignal, onCleanup, batch, For, Show } from "solid-js"
+import { createEffect, createMemo, createResource, createSignal, on, onCleanup, batch, For, Show } from "solid-js"
 import type { InputRenderable } from "@opentui/core"
 import { TextAttributes } from "@opentui/core"
 import { loadDialogSessionList } from "./dialog-session-list"
@@ -31,6 +31,13 @@ export function groupLabel(updated: number) {
   return "Older"
 }
 
+export function reanchor(cursor: number, anchor: string | undefined, sessions: { id: string }[]) {
+  if (sessions.length === 0) return 0
+  const index = anchor ? sessions.findIndex((session) => session.id === anchor) : -1
+  if (index >= 0) return index
+  return Math.min(Math.max(cursor, 0), sessions.length - 1)
+}
+
 export function SessionHistoryRail(props: { focused: () => boolean; onFocus: () => void; onUnfocus: () => void }) {
   const dialog = useDialog()
   const route = useRoute()
@@ -49,6 +56,7 @@ export function SessionHistoryRail(props: { focused: () => boolean; onFocus: () 
   const [search, setSearch] = createDebouncedSignal("", 150)
   const [searchOpen, setSearchOpen] = createSignal(false)
   const [cursor, setCursor] = createSignal(0)
+  let anchor: string | undefined
   const deleteHint = useCommandShortcut("session.rail.delete")
   const renameHint = useCommandShortcut("session.rail.rename")
   const searchHint = useCommandShortcut("session.rail.search")
@@ -94,6 +102,16 @@ export function SessionHistoryRail(props: { focused: () => boolean; onFocus: () 
   )
   const selectedID = createMemo(() => sessions()[cursor()]?.id)
 
+  createEffect(
+    on(sessions, (list) => {
+      const index = reanchor(cursor(), anchor, list)
+      setCursor(index)
+      const id = list[index]?.id
+      if (id !== anchor) setToDelete(undefined)
+      anchor = id
+    }),
+  )
+
   onCleanup(
     event.on("session.deleted", (evt) => {
       setDeleted((current) => new Set(current).add(evt.properties.info.id))
@@ -129,23 +147,24 @@ export function SessionHistoryRail(props: { focused: () => boolean; onFocus: () 
     setSearchOpen(false)
     setSearch("")
     setCursor(0)
+    anchor = sessions()[0]?.id
   }
 
   function move(direction: number) {
-    const total = sessions().length
-    if (total === 0) return
-    setCursor((index) => {
-      const next = index + direction
-      if (next < 0) return 0
-      if (next >= total) return total - 1
-      return next
-    })
+    const list = sessions()
+    if (list.length === 0) return
+    const next = Math.min(Math.max(cursor() + direction, 0), list.length - 1)
+    setCursor(next)
+    anchor = list[next]?.id
   }
 
   function openSession(sessionID: string) {
     route.navigate({ type: "session", sessionID })
     setToDelete(undefined)
     if (searchOpen()) closeSearch()
+    anchor = sessionID
+    const index = sessions().findIndex((session) => session.id === sessionID)
+    if (index >= 0) setCursor(index)
     props.onUnfocus()
   }
 
