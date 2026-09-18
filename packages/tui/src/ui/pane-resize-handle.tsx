@@ -6,7 +6,7 @@ export function PaneResizeHandle(props: {
   left: number
   highlight?: "left" | "right"
 }) {
-  const theme = useTheme("elevated")
+  const theme = useTheme().surface("raised")
 
   return (
     <box

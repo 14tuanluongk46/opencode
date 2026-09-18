@@ -86,8 +86,8 @@ function Answer(props: { question: string; answer: string }) {
   const toast = useToast()
   const clipboard = useClipboard()
   const plugins = usePlugin()
-  const theme = useTheme("elevated")
-  const overlay = useTheme("overlay")
+  const theme = useTheme().surface("raised")
+  const overlay = useTheme().surface("overlay")
   const syntax = useThemes().currentSyntax
   const config = useConfig().data
   const dimensions = useTerminalDimensions()

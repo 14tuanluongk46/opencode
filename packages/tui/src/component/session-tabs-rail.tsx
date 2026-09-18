@@ -10,7 +10,7 @@ export function SessionTabsRailControls(props: {
   tabs: SessionTabsController
   belowHighlighted: boolean
 }) {
-  const theme = useTheme("elevated")
+  const theme = useTheme().surface("raised")
   const keymap = Keymap.use()
   const [hovered, setHovered] = createSignal(false)
   const hoverColor = createMemo(() =>

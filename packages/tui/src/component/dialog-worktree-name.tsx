@@ -8,7 +8,7 @@ import { useConfig } from "../config"
 
 export function DialogWorktreeName(props: { onConfirm: (name: string) => void }) {
   const dialog = useDialog()
-  const theme = useTheme("elevated")
+  const theme = useTheme().surface("raised")
   const shortcuts = Keymap.useShortcuts()
   const config = useConfig().data
   const [inputTarget, setInputTarget] = createSignal<InputRenderable>()

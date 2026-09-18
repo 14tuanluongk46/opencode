@@ -42,7 +42,7 @@ export type ComposerProps = {
 }
 
 export function Composer(props: ComposerProps) {
-  const theme = useTheme("elevated")
+  const theme = useTheme().surface("raised")
   const config = useConfig().data
 
   const [store, setStore] = createStore({

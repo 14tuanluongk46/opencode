@@ -23,8 +23,8 @@ type Active = ExportFormat | "thinking" | "tools" | "sanitize" | "copy" | "expor
 
 export function DialogExportOptions(props: DialogExportOptionsProps) {
   const dialog = useDialog()
-  const theme = useTheme("elevated")
-  const overlayTheme = useTheme("overlay")
+  const theme = useTheme().surface("raised")
+  const overlayTheme = useTheme().surface("overlay")
   const [store, setStore] = createStore({
     format: "markdown" as ExportFormat,
     thinking: props.defaultThinking,

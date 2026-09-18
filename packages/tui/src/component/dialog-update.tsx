@@ -15,7 +15,7 @@ export function DialogUpdate(props: {
   restart: () => void
 }) {
   const dialog = useDialog()
-  const theme = useTheme("elevated")
+  const theme = useTheme().surface("raised")
   const [error, setError] = createSignal<string>()
   const [active, setActive] = createSignal(0)
   const controller = new AbortController()

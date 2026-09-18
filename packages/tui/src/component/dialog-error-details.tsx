@@ -27,7 +27,7 @@ export function DialogErrorDetails(props: {
   const location = useLocation()
   const route = useRoute()
   const toast = useToast()
-  const theme = useTheme("elevated")
+  const theme = useTheme().surface("raised")
   const renderer = useRenderer()
   const dimensions = useTerminalDimensions()
   const config = useConfig().data

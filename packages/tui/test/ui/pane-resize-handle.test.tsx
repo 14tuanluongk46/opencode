@@ -19,7 +19,7 @@ for (const mode of ["dark", "light"] as const) {
     let theme!: ReturnType<typeof useTheme>
     let parent!: BoxRenderable
     function Pane() {
-      theme = useTheme("elevated")
+      theme = useTheme().surface("raised")
       resize = createPaneResize({
         value,
         defaultValue: () => 16,

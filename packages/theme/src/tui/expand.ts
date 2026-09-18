@@ -8,15 +8,7 @@ import type {
 import { ActionState } from "./schema.js"
 
 export function expandTheme<Definition extends ModeDefinition>(definition: Definition): Definition {
-  return {
-    ...definition,
-    ...expandTokens(definition),
-    ...Object.fromEntries(
-      Object.entries(definition)
-        .filter(([key]) => key.startsWith("@context:"))
-        .map(([key, value]) => [key, expandTokens(value as ThemeTokensDefinition)]),
-    ),
-  }
+  return { ...definition, ...expandTokens(definition) }
 }
 
 export function expandTokens(definition: ThemeTokensDefinition): ThemeTokensDefinition {

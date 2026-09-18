@@ -59,7 +59,7 @@ const drafts = new Map<string, FormDraft>()
 export function FormPrompt(props: { form: FormWithLocation }) {
   const data = useData()
   const themes = useThemes()
-  const theme = useTheme("elevated")
+  const theme = useTheme().surface("raised")
   const themeMode = themes.mode
   const renderer = useRenderer()
   const dimensions = useTerminalDimensions()

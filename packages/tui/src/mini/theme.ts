@@ -115,7 +115,7 @@ function map(
   syntax?: SyntaxStyle,
   system = false,
 ): RunTheme {
-  const elevated = theme.contextual.elevated
+  const elevated = theme.surface("raised")
   // V1 system migration serializes colors; restore terminal defaults before quantizing scrollback.
   const exact = (color: RGBA) => {
     if (system && color.equals(theme.text.default)) return RGBA.defaultForeground(color)
@@ -159,7 +159,7 @@ function map(
       text: exact(theme.text.default),
       shade: exact(elevated.background.default),
       surface: exact(elevated.background.default),
-      pane: exact(theme.contextual.overlay.background.default),
+      pane: exact(theme.surface("overlay").background.default),
       border: exact(theme.border.default),
       line: exact(theme.background.raised.high),
     },

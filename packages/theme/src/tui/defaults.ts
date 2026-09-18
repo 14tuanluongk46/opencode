@@ -218,20 +218,6 @@ export const DEFAULT_THEME = {
       imageText: "$hue.cyan.600",
       codeBlock: "$hue.neutral.900",
     },
-    "@context:elevated": {
-      text: { action: { primary: { default: "$hue.neutral.100" } } },
-      background: {
-        default: "$background.raised.base",
-        action: { primary: { default: "$hue.interactive.500", $hovered: "$background.raised.high" } },
-      },
-    },
-    "@context:overlay": {
-      text: { action: { primary: { default: "$hue.neutral.100" } } },
-      background: {
-        default: "$background.raised.high",
-        action: { primary: { default: "$hue.interactive.500" } },
-      },
-    },
   },
   dark: {
     hue: {
@@ -439,20 +425,6 @@ export const DEFAULT_THEME = {
       image: "$hue.accent.400",
       imageText: "$hue.cyan.400",
       codeBlock: "$hue.neutral.100",
-    },
-    "@context:elevated": {
-      text: { action: { primary: { default: "$hue.neutral.200" } } },
-      background: {
-        default: "$background.raised.base",
-        action: { primary: { default: "$hue.interactive.400", $hovered: "$background.raised.high" } },
-      },
-    },
-    "@context:overlay": {
-      text: { action: { primary: { default: "$hue.neutral.200" } } },
-      background: {
-        default: "$background.raised.high",
-        action: { primary: { default: "$hue.interactive.400" } },
-      },
     },
   },
 } satisfies ThemeDocument

@@ -277,7 +277,7 @@ function RejectPrompt(props: {
 }) {
   let input: TextareaRenderable
   const enabled = useInteractivity()
-  const theme = useTheme("elevated")
+  const theme = useTheme().surface("raised")
   const config = useConfig().data
   const dimensions = useTerminalDimensions()
   const narrow = createMemo(() => dimensions().width < 80)
@@ -418,7 +418,7 @@ export function SessionQuestion<const T extends Record<string, string>>(props: {
   fullscreen?: boolean
   onSelect: (option: keyof T) => void
 }) {
-  const theme = useTheme("elevated")
+  const theme = useTheme().surface("raised")
   const dimensions = useTerminalDimensions()
   const keys = Object.keys(props.options) as (keyof T)[]
   const [store, setStore] = createStore({

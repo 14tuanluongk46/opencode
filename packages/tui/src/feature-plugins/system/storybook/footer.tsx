@@ -14,7 +14,7 @@ export function StoryFooter(props: {
   message?: string
   controls: readonly StoryFooterControl[]
 }) {
-  const theme = props.context.theme.contextual.elevated
+  const theme = props.context.theme.surface("raised")
 
   return (
     <box flexShrink={0} flexDirection="column" backgroundColor={theme.background.default}>

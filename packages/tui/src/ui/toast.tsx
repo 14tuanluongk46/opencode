@@ -22,7 +22,7 @@ function ToastSurface(props: {
   onHover?: (hovered: boolean) => void
   onActivate: () => void
 }) {
-  const theme = useTheme("overlay")
+  const theme = useTheme().surface("overlay")
   const dimensions = useTerminalDimensions()
   const renderer = useRenderer()
   const [hovered, setHovered] = createSignal(false)

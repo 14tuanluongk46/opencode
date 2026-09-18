@@ -12,7 +12,7 @@ export function DiffFileMenu(props: {
   onClose: () => void
 }) {
   const dimensions = useTerminalDimensions()
-  const theme = props.context.theme.contextual.overlay
+  const theme = props.context.theme.surface("overlay")
   const [hovered, setHovered] = createSignal(false)
   const label = () => (props.reviewed ? "Mark incomplete" : "Mark complete")
   const width = () => Math.min(19, dimensions().width)

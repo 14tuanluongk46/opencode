@@ -246,24 +246,25 @@ Syntax keys are `comment`, `keyword`, `function`, `variable`, `string`, `number`
 `punctuation`. Markdown keys are `text`, `heading`, `link`, `linkText`, `code`, `blockQuote`, `emphasis`, `strong`,
 `horizontalRule`, `listItem`, `listEnumeration`, `image`, `imageText`, and `codeBlock`.
 
-## Contexts
+## Raised surfaces
 
-Use context overrides for elevated panels and overlays while keeping the base theme elsewhere:
+Dialogs, panels, menus, and toasts sit on raised surfaces. Set their backgrounds with `background.raised`; the TUI
+re-resolves the rest of the palette on top of them, so tokens that reference `$background.default` follow the surface:
 
 ```json title="themes/ocean.json"
 {
   "version": 2,
   "dark": {
     "background": {
-      "default": "#071521"
-    },
-    "@context:overlay": {
-      "background": {
-        "default": "#102a3c"
+      "default": "#071521",
+      "raised": {
+        "base": "#0c1f2e",
+        "high": "#102a3c",
+        "max": "#16364b"
       }
     }
   }
 }
 ```
 
-The available keys are `@context:elevated` and `@context:overlay`. Each accepts the same token groups as the base mode.
+`base` is used for panels and dialogs, `high` for menus and toasts that float above them. `max` is reserved.

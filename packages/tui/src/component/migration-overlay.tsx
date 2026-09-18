@@ -10,7 +10,7 @@ type Progress = { label: string; numerator?: number; denominator?: number }
 export function MigrationOverlay() {
   const client = useClient()
   const toast = useToast()
-  const theme = useTheme("overlay")
+  const theme = useTheme().surface("overlay")
   const [progress, setProgress] = createSignal<Progress>()
   const abort = new AbortController()
 

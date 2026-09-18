@@ -366,7 +366,7 @@ export function createTabMarquee(animations: () => boolean) {
 
 function TabContextMenu(props: { state: TabContextMenuState; tabs: SessionTabsController; onClose: () => void }) {
   const dimensions = useTerminalDimensions()
-  const theme = useTheme("elevated")
+  const theme = useTheme().surface("raised")
   const dialog = useDialog()
   onCleanup(Keymap.use().mode.push("menu"))
   Keymap.createLayer(() => ({
@@ -515,7 +515,7 @@ function VerticalSessionTabs(props: {
   const data = props.controller ? undefined : useData()
   const dimensions = useTerminalDimensions()
   const renderer = useRenderer()
-  const theme = useTheme("elevated")
+  const theme = useTheme().surface("raised")
   const base = useTheme()
   const config = useConfig().data
   const animations = () => props.animations ?? config.animations ?? true

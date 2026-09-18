@@ -26,14 +26,12 @@ export {
   type MergeModeDefinition,
   type Mode,
   type StatefulColorDefinition,
-  type ContextKey,
   type TextDefinition,
   type ThemeTokensDefinition,
 } from "./schema.js"
 
 export type {
   Categorical,
-  ContextName,
   FormfieldColor,
   Hue,
   HueSource,
@@ -43,6 +41,7 @@ export type {
   ResolvedTheme,
   ResolvedThemeTokens,
   StatefulColor,
+  SurfaceName,
 } from "./types.js"
 export { DEFAULT_CATEGORICAL, DEFAULT_THEME } from "./defaults.js"
 export { expandTheme } from "./expand.js"

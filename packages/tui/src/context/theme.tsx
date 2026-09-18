@@ -5,7 +5,6 @@ import {
   resolveThemeDocument,
   themeModes,
   type ResolvedTheme,
-  type ContextName,
 } from "@opencode/theme/tui"
 import {
   DEFAULT_THEMES,
@@ -23,8 +22,8 @@ import {
 } from "../theme"
 import { generateSystem, terminalMode } from "../theme/system"
 import { discoverThemes } from "../theme/discovery"
-import { createComponentTheme, createComponentThemeView, type ComponentTheme } from "../theme/component"
-import { createEffect, createMemo, createSignal, onCleanup, onMount, type Accessor, type ParentProps } from "solid-js"
+import { createComponentTheme, type ComponentTheme } from "../theme/component"
+import { createEffect, createMemo, createSignal, onCleanup, onMount, type Accessor } from "solid-js"
 import { createStore, produce } from "solid-js/store"
 import { createSimpleContext } from "./helper"
 import { useConfig } from "../config"
@@ -122,7 +121,6 @@ type Themes = {
 }
 
 type ThemeContextValue = {
-  current: ComponentTheme["contextual"][ContextName]
   themes: Themes
   readonly ready: boolean
 }
@@ -322,7 +320,7 @@ const themeContext = createSimpleContext({
     const tokens = () => selected().theme
     tokens()
     themePerformance.set("Init", `${(performance.now() - initStarted).toFixed(2)} ms`)
-    const current = createComponentTheme(tokens, mode)
+    const current = createComponentTheme(tokens)
 
     createEffect(() => renderer.setBackgroundColor(tokens().background.default))
 
@@ -365,7 +363,6 @@ const themeContext = createSimpleContext({
       },
     }
     return {
-      current,
       themes: service,
       get ready() {
         return service.ready
@@ -377,31 +374,14 @@ const themeContext = createSimpleContext({
 export function useThemes() {
   return themeContext.use().themes
 }
-export function useTheme(): ComponentTheme
-export function useTheme(context: ContextName): ComponentTheme["contextual"][ContextName]
-export function useTheme(context?: ContextName) {
-  const value = themeContext.use()
-  return context ? value.themes.current.contextual[context] : value.current
+export function useTheme(): ComponentTheme {
+  return themeContext.use().themes.current
 }
 export const ThemeProvider = themeContext.provider
 
 function usablePalette(colors: TerminalColors | undefined): colors is TerminalColors {
   return Boolean(
     colors && (colors.defaultBackground ?? colors.palette[0]) && (colors.defaultForeground ?? colors.palette[7]),
-  )
-}
-
-/** Switches context without remounting children; undefined inherits the enclosing view. */
-export function ThemeContextProvider(props: ParentProps<{ context: ContextName | undefined }>) {
-  const value = themeContext.use()
-  const current = createComponentThemeView(() => {
-    const name = props.context
-    return name ? value.themes.currentTokens().contextual[name] : value.current
-  }, value.themes.mode)
-  return (
-    <themeContext.context.Provider value={{ current, themes: value.themes, ready: value.ready }}>
-      {props.children}
-    </themeContext.context.Provider>
   )
 }
 

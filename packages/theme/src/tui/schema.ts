@@ -40,9 +40,6 @@ export const CategoricalDefinition = Schema.Array(HueName).check(Schema.isMinLen
 export type CategoricalDefinition = Schema.Schema.Type<typeof CategoricalDefinition>
 const HueColorValue = Schema.Union([HexColor, Schema.TemplateLiteral(["$hue.", HueName, ".", HueStep])])
 
-const ContextKey = Schema.Literals(["@context:elevated", "@context:overlay"])
-export type ContextKey = Schema.Schema.Type<typeof ContextKey>
-
 const HueScaleDefinition = Schema.Record(HueStep, HexColor)
 const HueValueDefinition = Schema.Union([Schema.TemplateLiteral(["$hue.", HueName]), HueScaleDefinition])
 
@@ -229,8 +226,6 @@ const ThemeDefinitionFields = Schema.Struct({
   hue: HueDefinition,
   categorical: Schema.optional(CategoricalDefinition),
   ...ThemeTokensDefinition.fields,
-  "@context:elevated": Schema.optional(ThemeTokensDefinition),
-  "@context:overlay": Schema.optional(ThemeTokensDefinition),
 })
 export const ThemeDefinition = ThemeDefinitionFields
 export type ThemeDefinition = Schema.Schema.Type<typeof ThemeDefinition>
@@ -239,8 +234,6 @@ const FileThemeDefinition = Schema.Struct({
   hue: Schema.optional(HueOverrideDefinition),
   categorical: Schema.optional(CategoricalDefinition),
   ...ThemeTokensDefinition.fields,
-  "@context:elevated": Schema.optional(ThemeTokensDefinition),
-  "@context:overlay": Schema.optional(ThemeTokensDefinition),
 })
 export type FileThemeDefinition = Schema.Schema.Type<typeof FileThemeDefinition>
 
@@ -249,8 +242,6 @@ const MergeModeDefinition = Schema.Struct({
   hue: Schema.optional(HueOverrideDefinition),
   categorical: Schema.optional(CategoricalDefinition),
   ...ThemeTokensDefinition.fields,
-  "@context:elevated": Schema.optional(ThemeTokensDefinition),
-  "@context:overlay": Schema.optional(ThemeTokensDefinition),
 })
 export type MergeModeDefinition = Schema.Schema.Type<typeof MergeModeDefinition>
 export const ModeDefinition = Schema.Union([MergeModeDefinition, FileThemeDefinition])

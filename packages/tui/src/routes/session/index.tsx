@@ -23,7 +23,7 @@ import { SplitBorder } from "../../ui/border"
 import { useTuiPaths, useTuiTerminalEnvironment } from "../../context/runtime"
 import { Spinner, SPINNER_FRAMES } from "../../component/spinner"
 import { PatchDiff } from "../../component/patch-diff"
-import { createSyntaxStyleMemo, ThemeContextProvider, useTheme, useThemes } from "../../context/theme"
+import { createSyntaxStyleMemo, useTheme, useThemes } from "../../context/theme"
 import { BoxRenderable, ScrollBoxRenderable, addDefaultParsers, TextAttributes, RGBA, MouseEvent } from "@opentui/core"
 import { Prompt, type PromptRef } from "../../component/prompt"
 import type {
@@ -1936,7 +1936,7 @@ function AssistantFooter(props: { message: SessionMessageAssistant }) {
   const config = useConfig()
   const data = useData()
   const local = useLocal()
-  const theme = useTheme("elevated")
+  const theme = useTheme().surface("raised")
   const model = createMemo(
     () =>
       ctx
@@ -2165,7 +2165,7 @@ function RevertMessage(props: {
   }>
 }) {
   const ctx = use()
-  const theme = useTheme("elevated")
+  const theme = useTheme().surface("raised")
   const route = useRouteData("session")
   const client = useClient()
   const toast = useToast()
@@ -2268,7 +2268,7 @@ function UserMessage(props: { message: SessionMessageUser }) {
     ),
   )
   const themes = useThemes()
-  const theme = useTheme("elevated")
+  const theme = useTheme().surface("raised")
   const mode = themes.mode
   const [hover, setHover] = createSignal(false)
   const color = createMemo(() => local.agent.color(data.session.get(ctx.sessionID)?.agent ?? "build"))
@@ -2384,7 +2384,7 @@ function UserMessage(props: { message: SessionMessageUser }) {
 }
 
 function QueuedPromptDock(props: { prompts: { id: string; text: string }[]; onOpen: () => void }) {
-  const theme = useTheme("elevated")
+  const theme = useTheme().surface("raised")
   const [hover, setHover] = createSignal(false)
   const next = createMemo(() => props.prompts[0]?.text.replaceAll("\n", " "))
 
@@ -2744,8 +2744,9 @@ function InlineTool(props: {
   )
 }
 
-function StatusBadge(props: { children: string }) {
-  const theme = useTheme()
+function StatusBadge(props: { children: string; raised?: boolean }) {
+  const base = useTheme()
+  const theme = props.raised ? base.surface("raised") : base
   return (
     <text flexShrink={0} bg={theme.raise(theme.background.default)} fg={theme.text.subdued}>
       {" "}
@@ -2767,16 +2768,8 @@ type BlockToolProps = {
 }
 
 function BlockTool(props: BlockToolProps) {
-  const parentTheme = useTheme()
-  return (
-    <ThemeContextProvider context="elevated">
-      <BlockToolContent {...props} borderColor={parentTheme.background.default} />
-    </ThemeContextProvider>
-  )
-}
-
-function BlockToolContent(props: BlockToolProps & { borderColor: RGBA }) {
-  const theme = useTheme()
+  const base = useTheme()
+  const theme = base.surface("raised")
   const ctx = use()
   const renderer = useRenderer()
   const [hover, setHover] = createSignal(false)
@@ -2794,7 +2787,7 @@ function BlockToolContent(props: BlockToolProps & { borderColor: RGBA }) {
       gap={1}
       backgroundColor={hover() ? theme.raise(theme.background.default) : theme.background.default}
       customBorderChars={SplitBorder.customBorderChars}
-      borderColor={props.borderColor}
+      borderColor={base.background.default}
       onMouseOver={() => props.onClick && setHover(true)}
       onMouseOut={() => setHover(false)}
       onMouseUp={() => {
@@ -3027,7 +3020,7 @@ function ShellDisplay(props: {
           </Show>
         </Show>
         <Show when={props.background}>
-          <StatusBadge>Background</StatusBadge>
+          <StatusBadge raised>Background</StatusBadge>
         </Show>
       </box>
     </BlockTool>

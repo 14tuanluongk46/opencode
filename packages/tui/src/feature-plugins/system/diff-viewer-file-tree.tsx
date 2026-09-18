@@ -27,7 +27,7 @@ export type DiffViewerFileTreeProps = {
 }
 
 export function DiffViewerFileTree(props: DiffViewerFileTreeProps) {
-  const theme = useTheme("elevated")
+  const theme = useTheme().surface("raised")
   const [sourceHovered, setSourceHovered] = createSignal(false)
   const list = () => props.layout === "list"
   const tree = createMemo(() => buildFileTree(props.files))

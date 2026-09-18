@@ -22,8 +22,8 @@ test("resolves one-mode documents with defaults for the available mode", () => {
   const resolvedLight = resolveSource({ version: 2, light: {} }, "dark")
   const resolvedDark = resolveSource({ version: 2, dark: {} }, "light")
 
-  expect(resolvedLight.background.default.equals(resolveTheme(light).background.default)).toBeTrue()
-  expect(resolvedDark.background.default.equals(resolveTheme(dark).background.default)).toBeTrue()
+  expect(resolvedLight.background.default.equals(resolveTheme(light, "light").background.default)).toBeTrue()
+  expect(resolvedDark.background.default.equals(resolveTheme(dark, "dark").background.default)).toBeTrue()
   expect(resolvedLight.categorical.length).toBeGreaterThan(0)
   expect(resolvedDark.categorical.length).toBeGreaterThan(0)
 })
@@ -38,7 +38,7 @@ test("validates and resolves categorical hues in configured order", () => {
   expect(theme.categorical[0]).toBe(theme.hue.accent)
   expect(theme.categorical[1]).toBe(theme.hue.red)
   expect(theme.categorical[2]).toBe(theme.hue.interactive)
-  expect(theme.contextual.elevated.categorical).toBe(theme.categorical)
+  expect(theme.surface("raised").categorical).toBe(theme.categorical)
   expect(() => resolveSource({ version: 2, light: { categorical: [] } }, "light")).toThrow("Invalid theme")
   expect(() => resolveSource({ version: 2, light: { categorical: ["magenta"] } }, "light")).toThrow("Invalid theme")
 })
@@ -52,15 +52,15 @@ test("generates syntax with one categorical hue", () => {
 })
 
 test("uses the default categorical order for direct definitions", () => {
-  const theme = resolveTheme({ ...light, categorical: undefined })
+  const theme = resolveTheme({ ...light, categorical: undefined }, "light")
 
   expect(theme.categorical[0]).toBe(theme.hue.blue)
   expect(theme.categorical[1]).toBe(theme.hue.purple)
 })
 
 test("resolves independent definitions and hue aliases", () => {
-  const lightTheme = resolveTheme(light)
-  const darkTheme = resolveTheme(dark)
+  const lightTheme = resolveTheme(light, "light")
+  const darkTheme = resolveTheme(dark, "dark")
 
   expect(lightTheme.hue.accent).not.toBe(lightTheme.hue.blue)
   expect(lightTheme.hue.accent[500].equals(lightTheme.hue.blue[500])).toBeTrue()
@@ -74,30 +74,42 @@ test("resolves independent definitions and hue aliases", () => {
   expect(lightTheme.source(lightTheme.background.raised.base)).toEqual({ hue: "neutral", step: 300 })
   expect(lightTheme.increase(lightTheme.hue.red[100])).toBe(lightTheme.hue.red[200])
   expect(lightTheme.decrease(lightTheme.hue.red[200])).toBe(lightTheme.hue.red[100])
-  expect(lightTheme.contextual.elevated.increase(lightTheme.hue.red[100])).toBe(lightTheme.hue.red[200])
+  expect(lightTheme.surface("raised").increase(lightTheme.hue.red[100])).toBe(lightTheme.hue.red[200])
+  expect(lightTheme.raise(lightTheme.hue.red[100])).toBe(lightTheme.hue.red[200])
+  expect(darkTheme.raise(darkTheme.hue.red[200])).toBe(darkTheme.hue.red[100])
   expect(lightTheme.text.default).toBeInstanceOf(RGBA)
   expect(darkTheme.background.default).toBeInstanceOf(RGBA)
   expect(lightTheme.background.raised.base).toBe(lightTheme.hue.neutral[300])
   expect(lightTheme.background.raised.high).toBe(lightTheme.hue.neutral[400])
   expect(lightTheme.syntax.keyword).toBeInstanceOf(RGBA)
   expect(lightTheme.text.action.primary.default).toBe(lightTheme.hue.neutral[200])
-  expect(lightTheme.contextual.elevated.background.action.primary.default).toBe(lightTheme.hue.interactive[500])
-  expect(lightTheme.contextual.elevated.background.default).toBe(lightTheme.background.raised.base)
-  expect(lightTheme.contextual.elevated.text.action.primary.default).toBe(lightTheme.hue.neutral[100])
-  expect(lightTheme.contextual.overlay.background.action.primary.default).toBe(lightTheme.hue.interactive[500])
-  expect(lightTheme.contextual.overlay.background.default).toBe(lightTheme.background.raised.high)
-  expect(lightTheme.contextual.overlay.text.action.primary.default).toBe(lightTheme.hue.neutral[100])
-  expect(darkTheme.contextual.elevated.background.action.primary.default).toBe(darkTheme.hue.interactive[400])
-  expect(darkTheme.contextual.elevated.text.action.primary.default).toBe(darkTheme.hue.neutral[200])
-  expect(darkTheme.contextual.overlay.background.action.primary.default).toBe(darkTheme.hue.interactive[400])
-  expect(darkTheme.contextual.overlay.text.action.primary.default).toBe(darkTheme.hue.neutral[200])
+  // Surfaces re-resolve the same palette on a raised background, so `$background.default`
+  // references follow it while everything else stays the base value.
+  const raised = lightTheme.surface("raised")
+  expect(raised.background.default).toBe(lightTheme.background.raised.base)
+  expect(raised.background.formfield.default).toBe(lightTheme.background.raised.base)
+  expect(raised.background.feedback.error.default).toBe(lightTheme.background.raised.base)
+  expect(raised.background.action.primary.hovered).toBe(lightTheme.background.raised.high)
+  expect(raised.background.action.primary.default).toBe(lightTheme.background.action.primary.default)
+  expect(raised.background.action.primary.focused).toBe(lightTheme.background.action.primary.focused)
+  expect(raised.text.action.primary.default).toBe(lightTheme.text.action.primary.default)
+  expect(raised.surface("raised")).toBe(raised)
+  expect(raised.surface("overlay")).toBe(lightTheme.surface("overlay"))
+  const overlay = lightTheme.surface("overlay")
+  expect(overlay.background.default).toBe(lightTheme.background.raised.high)
+  expect(overlay.background.action.primary.hovered).toBe(lightTheme.background.action.primary.hovered)
+  expect(darkTheme.surface("raised").background.default).toBe(darkTheme.background.raised.base)
+  expect(darkTheme.surface("overlay").background.default).toBe(darkTheme.background.raised.high)
 })
 
 test("resolves base hue aliases and rejects circular hue aliases", () => {
-  const aliased = resolveTheme({
-    ...light,
-    hue: { ...light.hue, blue: "$hue.red", purple: "$hue.blue" },
-  })
+  const aliased = resolveTheme(
+    {
+      ...light,
+      hue: { ...light.hue, blue: "$hue.red", purple: "$hue.blue" },
+    },
+    "light",
+  )
   const overridden = resolveSource({ version: 2, light: { hue: { blue: "$hue.red" } }, dark: {} }, "light")
 
   expect(aliased.hue.blue).not.toBe(aliased.hue.red)
@@ -110,23 +122,29 @@ test("resolves base hue aliases and rejects circular hue aliases", () => {
   expect(aliased.source(aliased.hue.blue[500])).toEqual({ hue: "blue", step: 500 })
   expect(aliased.source(aliased.hue.purple[500])).toEqual({ hue: "purple", step: 500 })
   expect(() =>
-    resolveTheme({
-      ...light,
-      hue: { ...light.hue, red: "$hue.blue", blue: "$hue.red" },
-    }),
+    resolveTheme(
+      {
+        ...light,
+        hue: { ...light.hue, red: "$hue.blue", blue: "$hue.red" },
+      },
+      "light",
+    ),
   ).toThrow("Circular hue reference: red -> blue -> red")
 })
 
 test("steps by hue source when adjacent colors have equal values", () => {
   if (typeof light.hue.gray !== "object") throw new Error("Expected a concrete gray scale")
-  const theme = resolveTheme({
-    ...light,
-    hue: {
-      ...light.hue,
-      gray: { ...light.hue.gray, 200: "#eee8d5", 300: "#eee8d5", 400: "#d3d7c6" },
-      neutral: "$hue.gray",
+  const theme = resolveTheme(
+    {
+      ...light,
+      hue: {
+        ...light.hue,
+        gray: { ...light.hue.gray, 200: "#eee8d5", 300: "#eee8d5", 400: "#d3d7c6" },
+        neutral: "$hue.gray",
+      },
     },
-  })
+    "light",
+  )
 
   expect(theme.hue.neutral[200]).not.toBe(theme.hue.neutral[300])
   expect(theme.hue.neutral[200].equals(theme.hue.neutral[300])).toBeTrue()
@@ -198,7 +216,7 @@ test("expands user structural fallbacks before merging defaults", () => {
   expect(expanded.background.action.primary.pressed.toInts()).toEqual([18, 52, 86, 255])
   expect(isolatedState.background.action.primary.pressed.toInts()).toEqual([101, 67, 33, 255])
   expect(isolatedState.background.action.primary.focused.toInts()).toEqual(
-    resolveTheme(light).background.action.primary.focused.toInts(),
+    resolveTheme(light, "light").background.action.primary.focused.toInts(),
   )
 })
 
@@ -226,7 +244,7 @@ test("uses defaults for the selected mode when it merges the other mode", () => 
 })
 
 test("resolves matched action variants and states", () => {
-  const theme = resolveTheme(light)
+  const theme = resolveTheme(light, "light")
 
   expect(theme.text.action.primary.pressed).toBeInstanceOf(RGBA)
   expect(theme.text.action.primary.hovered).toBeInstanceOf(RGBA)
@@ -250,8 +268,9 @@ test("resolves elevated hover surfaces from direct colors", () => {
     "light",
   )
 
-  expect(theme.contextual.elevated.background.default.toInts()).toEqual([18, 52, 86, 255])
-  expect(theme.contextual.elevated.background.action.primary.hovered.toInts()).toEqual([35, 69, 103, 255])
+  expect(theme.surface("raised").background.default.toInts()).toEqual([18, 52, 86, 255])
+  expect(theme.surface("raised").background.action.primary.hovered.toInts()).toEqual([35, 69, 103, 255])
+  expect(theme.surface("overlay").background.default.toInts()).toEqual([35, 69, 103, 255])
 })
 
 test("resolves transparent colors", () => {
@@ -277,31 +296,20 @@ test("reports theme decoding failures as native errors", () => {
   ).toThrow('Invalid theme: custom "opaque" is an invalid value')
 })
 
-test("context overrides rewire semantic references and apply state precedence", () => {
-  const definition = override(light, {
-    text: {
-      default: "#111111",
-      action: {
-        primary: { default: "$text.default", $pressed: "#222222" },
-      },
+test("theme files cannot define surfaces; unknown context keys are ignored", () => {
+  const theme = resolveSource(
+    {
+      version: 2,
+      light: { text: { default: "#111111" }, "@context:elevated": { text: { default: "#333333" } } },
+      dark: {},
     },
-    "@context:elevated": {
-      text: {
-        default: "#333333",
-        action: { primary: { default: "#444444", $focused: "#555555" } },
-      },
-    },
-  })
-  const theme = resolveTheme(definition)
-  const overlay = theme.contextual.elevated
-
-  expect(overlay.text.default.toInts()).toEqual([51, 51, 51, 255])
-  expect(overlay.text.action.primary.pressed.toInts()).toEqual([68, 68, 68, 255])
-  expect(overlay.text.action.primary.focused.toInts()).toEqual([85, 85, 85, 255])
+    "light",
+  )
+  expect(theme.surface("raised").text.default.toInts()).toEqual([17, 17, 17, 255])
 })
 
-test("rejects missing, base, and contextual reference cycles", () => {
-  expect(() => resolveTheme(override(light, { text: { default: "$missing" } }))).toThrow(
+test("rejects missing and circular references", () => {
+  expect(() => resolveTheme(override(light, { text: { default: "$missing" } }), "light")).toThrow(
     'Theme reference "$missing" was not found',
   )
   expect(() =>
@@ -309,29 +317,29 @@ test("rejects missing, base, and contextual reference cycles", () => {
       override(light, {
         text: { default: "$text.subdued", subdued: "$text.default" },
       }),
-    ),
-  ).toThrow("Circular theme reference")
-  expect(() =>
-    resolveTheme(
-      override(light, {
-        "@context:elevated": { text: { default: "$text.default" } },
-      }),
+      "light",
     ),
   ).toThrow("Circular theme reference")
 })
 
 test("validates complete hues, resolved groups, and hue-only syntax", () => {
   expect(() =>
-    resolveTheme({
-      ...light,
-      hue: { ...light.hue, accent: "$hue.missing" },
-    } as unknown as ThemeDefinition),
+    resolveTheme(
+      {
+        ...light,
+        hue: { ...light.hue, accent: "$hue.missing" },
+      } as unknown as ThemeDefinition,
+      "light",
+    ),
   ).toThrow("$hue.missing")
   expect(() =>
-    resolveTheme({
-      ...light,
-      syntax: { ...light.syntax, keyword: "$text.default" },
-    } as unknown as ThemeDefinition),
+    resolveTheme(
+      {
+        ...light,
+        syntax: { ...light.syntax, keyword: "$text.default" },
+      } as unknown as ThemeDefinition,
+      "light",
+    ),
   ).toThrow("$text.default")
 })
 
